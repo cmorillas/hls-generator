@@ -9,34 +9,21 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
-# Release optimization flags
-if(CMAKE_BUILD_TYPE STREQUAL "Release")
-    if(MSVC)
-        add_compile_options(/O2)
-    else()
-        add_compile_options(-O2 -DNDEBUG)
-    endif()
-endif()
-
-# Detectar plataforma
+# Platform detection (set variables for later use with target-specific commands)
 if(WIN32)
     message(STATUS "Building for Windows")
-    add_definitions(-DPLATFORM_WINDOWS)
-    # Force OS_WIN and undefine __linux__ for CEF headers (MinGW cross-compilation)
-    # MinGW on Linux may have __linux__ defined, which confuses CEF's platform detection
-    add_compile_definitions(OS_WIN=1)
-    add_compile_options(-U__linux__)
+    set(PLATFORM_DEFINITIONS PLATFORM_WINDOWS OS_WIN=1)
+    set(PLATFORM_COMPILE_OPTIONS)
+    if(NOT MSVC)
+        list(APPEND PLATFORM_COMPILE_OPTIONS -U__linux__)
+    endif()
 elseif(UNIX AND NOT APPLE)
     message(STATUS "Building for Linux")
-    add_definitions(-DPLATFORM_LINUX)
-    add_compile_definitions(OS_LINUX=1)
-    add_compile_definitions(CEF_X11=1)
+    set(PLATFORM_DEFINITIONS PLATFORM_LINUX OS_LINUX=1 CEF_X11=1)
+    set(PLATFORM_COMPILE_OPTIONS)
 else()
     message(FATAL_ERROR "Unsupported platform")
 endif()
-
-# Include directories
-include_directories(src)
 
 # ===== CEF Scripts Embedding =====
 # Find all .js files in js-inject/ and embed them in the binary
@@ -92,8 +79,8 @@ if(JS_SCRIPTS)
          "    nullptr  // Sentinel\n"
          "};\n")
 
-    # Add generated directory to include path
-    include_directories(${CMAKE_BINARY_DIR}/generated)
+    # Save generated directory for target-specific include
+    set(GENERATED_HEADERS_DIR ${CMAKE_BINARY_DIR}/generated)
 
     message(STATUS "Generated master header: all_cef_scripts.h")
 else()
@@ -105,7 +92,7 @@ endif()
 # Headers for compilation, wrapper for C++ API, runtime uses OBS's libcef.so
 set(CEF_ROOT_DIR "${CMAKE_SOURCE_DIR}/external/cef")
 if(EXISTS "${CEF_ROOT_DIR}/include")
-    include_directories(${CEF_ROOT_DIR})
+    set(CEF_INCLUDE_DIR ${CEF_ROOT_DIR})
     message(STATUS "CEF headers found: ${CEF_ROOT_DIR}/include")
 
     # Add libcef_dll_wrapper subdirectory (provides C++ API wrappers)
@@ -130,7 +117,7 @@ if(NOT CMAKE_CROSSCOMPILING)
     if(PkgConfig_FOUND)
         pkg_check_modules(LIBAV QUIET libavformat libavcodec libavutil libswscale)
         if(LIBAV_FOUND)
-            include_directories(${LIBAV_INCLUDE_DIRS})
+            set(FFMPEG_INCLUDE_DIRS ${LIBAV_INCLUDE_DIRS})
             message(STATUS "FFmpeg headers found in system: ${LIBAV_INCLUDE_DIRS}")
             set(FFMPEG_HEADERS_FOUND TRUE)
         endif()
@@ -146,7 +133,7 @@ if(NOT FFMPEG_HEADERS_FOUND)
     endif()
 
     if(EXISTS "${FFMPEG_LOCAL_HEADERS}")
-        include_directories(${FFMPEG_LOCAL_HEADERS})
+        set(FFMPEG_INCLUDE_DIRS ${FFMPEG_LOCAL_HEADERS})
         message(STATUS "FFmpeg headers found in local directory: ${FFMPEG_LOCAL_HEADERS}")
         set(FFMPEG_HEADERS_FOUND TRUE)
     endif()
@@ -171,8 +158,8 @@ if(NOT FFMPEG_HEADERS_FOUND)
     # Download and extract (does not build FFmpeg, just extracts headers)
     FetchContent_MakeAvailable(ffmpeg)
 
-    # Add header paths (all lib* directories contain headers we need)
-    include_directories(
+    # Set header paths (all lib* directories contain headers we need)
+    set(FFMPEG_INCLUDE_DIRS
         ${ffmpeg_SOURCE_DIR}/libavcodec
         ${ffmpeg_SOURCE_DIR}/libavdevice
         ${ffmpeg_SOURCE_DIR}/libavfilter
@@ -214,6 +201,44 @@ list(APPEND SOURCES
 # Executable
 add_executable(hls-generator ${SOURCES})
 
+# Modern CMake: Target-specific properties instead of global commands
+# Platform definitions
+target_compile_definitions(hls-generator PRIVATE ${PLATFORM_DEFINITIONS})
+
+# Platform-specific compile options
+if(PLATFORM_COMPILE_OPTIONS)
+    target_compile_options(hls-generator PRIVATE ${PLATFORM_COMPILE_OPTIONS})
+endif()
+
+# Release optimization flags
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+    if(MSVC)
+        target_compile_options(hls-generator PRIVATE /O2)
+    else()
+        target_compile_options(hls-generator PRIVATE -O2)
+        target_compile_definitions(hls-generator PRIVATE NDEBUG)
+    endif()
+endif()
+
+# Include directories
+target_include_directories(hls-generator PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+    ${CEF_INCLUDE_DIR}
+    ${FFMPEG_INCLUDE_DIRS}
+)
+
+# Add generated headers if available
+if(GENERATED_HEADERS_DIR)
+    target_include_directories(hls-generator PRIVATE ${GENERATED_HEADERS_DIR})
+endif()
+
+# Warnings
+if(MSVC)
+    target_compile_options(hls-generator PRIVATE /W4)
+else()
+    target_compile_options(hls-generator PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
 # Platform-specific libraries (NO FFmpeg/CEF system libraries needed!)
 # Both platforms load libraries dynamically at runtime
 if(WIN32)
@@ -248,13 +273,6 @@ endif()
 
 message(STATUS "Using CEF from OBS Studio (loaded dynamically at runtime)")
 message(STATUS "Linking with: libcef_dll_wrapper (C++ API)")
-
-# Warnings
-if(MSVC)
-    target_compile_options(hls-generator PRIVATE /W4)
-else()
-    target_compile_options(hls-generator PRIVATE -Wall -Wextra -Wpedantic)
-endif()
 
 message(STATUS "")
 message(STATUS "Configuration Summary:")

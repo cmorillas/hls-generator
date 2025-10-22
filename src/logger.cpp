@@ -30,9 +30,17 @@ void Logger::log(LogLevel level, const std::string& message) {
         return;
     }
 
-    // Timestamp
+    // Timestamp (thread-safe version)
     auto now = std::time(nullptr);
-    auto tm = *std::localtime(&now);
+    std::tm tm{};
+
+#ifdef _WIN32
+    // Windows: use localtime_s (thread-safe)
+    localtime_s(&tm, &now);
+#else
+    // Linux/POSIX: use localtime_r (thread-safe)
+    localtime_r(&now, &tm);
+#endif
 
     std::ostringstream oss;
     oss << "[" << std::put_time(&tm, "%Y-%m-%d %H:%M:%S") << "] ";

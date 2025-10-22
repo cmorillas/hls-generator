@@ -45,16 +45,17 @@ private:
     std::unique_ptr<SwsContext, SwsContextDeleter> sws_ctx_;
     std::unique_ptr<AVFrame, AVFrameDeleter> yuv_frame_;
     std::unique_ptr<AVFrame, AVFrameDeleter> audio_frame_;
+
+    // Order matches initialization order in constructor to avoid -Wreorder warnings
+    AppConfig config_;
     int video_stream_index_;
     int audio_stream_index_;
 
-    AppConfig config_;
-
     std::mutex frame_mutex_;
     std::mutex encoder_mutex_;
-    std::atomic<bool> resetting_encoders_;
     std::vector<uint8_t> current_frame_;
     bool frame_ready_;
+    std::atomic<bool> resetting_encoders_;
     int64_t frame_count_;
     int64_t start_time_ms_;
     int snapshot_width_;

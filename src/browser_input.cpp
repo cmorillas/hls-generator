@@ -74,7 +74,7 @@ bool BrowserInput::open(const std::string& uri) {
     }
 
     if (!setupAudioEncoder(config_.audio.sample_rate, config_.audio.channels)) {
-        Logger::warn("Failed to setup audio encoder");
+        Logger::error("Failed to setup audio encoder - stream will have no audio");
     } else {
         Logger::info("Audio encoder initialized (" + std::to_string(config_.audio.sample_rate) + "Hz, " + std::to_string(config_.audio.channels) + " channels)");
     }
@@ -531,6 +531,9 @@ void BrowserInput::onFrameReceived(const uint8_t* bgra_data, int width, int heig
     int adjusted_width = width & ~1;
     int adjusted_height = height & ~1;
 
+    // Acquire lock BEFORE modifying sws_ctx_ to prevent race conditions
+    std::lock_guard<std::mutex> lock(frame_mutex_);
+
     if (adjusted_width != snapshot_width_ || adjusted_height != snapshot_height_) {
         if (adjusted_width != width || adjusted_height != height) {
             Logger::info("Snapshot dimensions: " + std::to_string(width) + "x" + std::to_string(height) +
@@ -560,8 +563,6 @@ void BrowserInput::onFrameReceived(const uint8_t* bgra_data, int width, int heig
         snapshot_width_ = adjusted_width;
         snapshot_height_ = adjusted_height;
     }
-
-    std::lock_guard<std::mutex> lock(frame_mutex_);
 
     size_t frame_size = width * height * 4;
     current_frame_.resize(frame_size);
@@ -648,7 +649,7 @@ bool BrowserInput::encodeAudio(AVPacket* packet) {
 
     int ret = FFmpegLib::avcodec_send_frame(audio_codec_ctx_.get(), audio_frame_.get());
     if (ret < 0) {
-        Logger::warn("Error sending audio frame to encoder");
+        Logger::error("Error sending audio frame to encoder");
         return false;
     }
 
@@ -656,7 +657,7 @@ bool BrowserInput::encodeAudio(AVPacket* packet) {
     if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
         return false;
     } else if (ret < 0) {
-        Logger::warn("Error receiving encoded audio packet");
+        Logger::error("Error receiving encoded audio packet");
         return false;
     }
 

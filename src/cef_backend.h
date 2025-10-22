@@ -71,13 +71,14 @@ public:
     void setJsInjectionEnabled(bool enabled) { enable_js_injection_ = enabled; }
     bool isJsInjectionEnabled() const { return enable_js_injection_; }
 
-    // Public access to dimensions
+    // Public access to dimensions (order matches constructor for -Wreorder)
     int width_;
     int height_;
 
 private:
     // CEF handles using opaque pointers (actual CefRefPtr<T> in implementation)
     // We use void* here to avoid including CEF headers in this public header
+    // Order matches initialization order in constructor to avoid -Wreorder warnings
     void* browser_;  // Actually CefRefPtr<CefBrowser>*
     void* client_;   // Actually CefRefPtr<CefClient>*
 

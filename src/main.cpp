@@ -3,6 +3,14 @@
 #include <cstring>
 #include <csignal>
 #include <atomic>
+#include <fstream>
+#include <sys/stat.h>
+#ifdef _WIN32
+    #include <process.h>  // For _getpid()
+    #define getpid _getpid
+#else
+    #include <unistd.h>   // For getpid()
+#endif
 #include "obs_detector.h"
 #include "logger.h"
 #include "hls_generator.h"
@@ -16,7 +24,7 @@
 static std::atomic<bool> g_interrupted(false);
 
 // Signal handler for graceful shutdown
-void signalHandler(int signum) {
+void signalHandler(int) {
     Logger::info("");
     Logger::info("Interrupt signal received (Ctrl+C), shutting down gracefully...");
     g_interrupted.store(true);
@@ -48,27 +56,93 @@ void printUsage(const char* progName) {
     std::cout << "  " << progName << " --no-js https://example.com /path/to/output" << std::endl;
 }
 
+// Helper function to check if string is a URL
+bool isUrl(const std::string& str) {
+    return (str.find("http://") == 0 || str.find("https://") == 0 ||
+            str.find("rtmp://") == 0 || str.find("rtmps://") == 0 ||
+            str.find("rtsp://") == 0 || str.find("srt://") == 0 ||
+            str.find("ndi://") == 0);
+}
+
+// Validate input file/URL
+bool validateInput(const std::string& input) {
+    if (isUrl(input)) {
+        return true;  // URLs are assumed valid (will fail later if not accessible)
+    }
+
+    // Check if local file exists
+    std::ifstream file(input);
+    if (!file.good()) {
+        Logger::error("Input file does not exist: " + input);
+        return false;
+    }
+    return true;
+}
+
+// Validate output directory
+bool validateOutputDir(const std::string& outputDir) {
+    struct stat info;
+
+    // Check if directory exists
+    if (stat(outputDir.c_str(), &info) != 0) {
+        Logger::error("Output directory does not exist: " + outputDir);
+        Logger::error("Please create the directory first: mkdir -p " + outputDir);
+        return false;
+    }
+
+    // Check if it's actually a directory
+    if (!(info.st_mode & S_IFDIR)) {
+        Logger::error("Output path is not a directory: " + outputDir);
+        return false;
+    }
+
+    // Check if writable by attempting to create a test file
+    std::string testFile = outputDir + "/.write_test_" + std::to_string(getpid());
+    std::ofstream test(testFile);
+    if (!test.good()) {
+        Logger::error("Output directory is not writable: " + outputDir);
+        Logger::error("Please check permissions");
+        return false;
+    }
+    test.close();
+    std::remove(testFile.c_str());
+
+    return true;
+}
+
 int main(int argc, char* argv[]) {
     // Parse command line arguments
     bool enable_js_injection = true;  // Enabled by default
-    int arg_offset = 1;
+    int arg_index = 1;
 
     // Check for --no-js flag
     if (argc > 1 && strcmp(argv[1], "--no-js") == 0) {
         enable_js_injection = false;
-        arg_offset = 2;  // Skip the flag
+        arg_index = 2;  // Skip the flag
     }
 
-    // Validate remaining arguments
-    if (argc - arg_offset + 1 != 3) {
+    // Validate we have exactly 2 remaining arguments: <input> <output>
+    int required_args = 2;
+    int remaining_args = argc - arg_index;
+
+    if (remaining_args != required_args) {
         printUsage(argv[0]);
         return 1;
     }
 
     AppConfig config;
-    config.hls.inputFile = argv[arg_offset];
-    config.hls.outputDir = argv[arg_offset + 1];
+    config.hls.inputFile = argv[arg_index];
+    config.hls.outputDir = argv[arg_index + 1];
     config.browser.enableJsInjection = enable_js_injection;
+
+    // Validate input and output before proceeding (fail-fast)
+    if (!validateInput(config.hls.inputFile)) {
+        return 1;
+    }
+
+    if (!validateOutputDir(config.hls.outputDir)) {
+        return 1;
+    }
 
     Logger::info("=== HLS Generator ===");
     Logger::info("Input: " + config.hls.inputFile);

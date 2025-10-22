@@ -72,6 +72,13 @@ extern "C" {
 #define sws_freeContext FFmpegLib::sws_freeContext
 #define sws_scale FFmpegLib::sws_scale
 
+// Constants for logging and control flow
+namespace {
+    constexpr int PACKET_LOG_INTERVAL = 100;           // Log every N packets
+    constexpr int FRAME_LOG_INTERVAL = 100;            // Log every N frames
+    constexpr int MAX_EMPTY_READ_ATTEMPTS = 1000;      // Max empty reads before EOF
+}
+
 FFmpegWrapper::FFmpegWrapper() = default;
 
 FFmpegWrapper::~FFmpegWrapper() = default;
@@ -564,14 +571,14 @@ bool FFmpegWrapper::processVideoRemux() {
         if (packet->stream_index == videoStreamIndex_) {
             videoPacketCount++;
 
-            if (videoPacketCount % 100 == 0) {
+            if (videoPacketCount % PACKET_LOG_INTERVAL == 0) {
                 Logger::debug("Processed " + std::to_string(videoPacketCount) + " video packets, " +
                              std::to_string(audioPacketCount) + " audio packets");
             }
 
             if (bsfCtx_) {
                 if (av_bsf_send_packet(bsfCtx_.get(), packet) < 0) {
-                    Logger::warn("Error sending packet to bitstream filter");
+                    Logger::error("Error sending packet to bitstream filter");
                     av_packet_unref(packet);
                     continue;
                 }
@@ -583,7 +590,7 @@ bool FFmpegWrapper::processVideoRemux() {
                         outputFormatCtx_->streams[outputVideoStreamIndex_]->time_base);
 
                     if (av_interleaved_write_frame(outputFormatCtx_.get(), packet) < 0) {
-                        Logger::warn("Error writing video frame");
+                        Logger::error("Error writing video frame to HLS output");
                     }
 
                     av_packet_unref(packet);
@@ -595,7 +602,7 @@ bool FFmpegWrapper::processVideoRemux() {
                     outputFormatCtx_->streams[outputVideoStreamIndex_]->time_base);
 
                 if (av_interleaved_write_frame(outputFormatCtx_.get(), packet) < 0) {
-                    Logger::warn("Error writing video frame");
+                    Logger::error("Error writing video frame to HLS output");
                 }
 
                 av_packet_unref(packet);
@@ -609,7 +616,7 @@ bool FFmpegWrapper::processVideoRemux() {
                 outputFormatCtx_->streams[outputAudioStreamIndex_]->time_base);
 
             if (av_interleaved_write_frame(outputFormatCtx_.get(), packet) < 0) {
-                Logger::warn("Error writing audio frame");
+                Logger::error("Error writing audio frame to HLS output");
             }
 
             av_packet_unref(packet);
@@ -652,7 +659,7 @@ bool FFmpegWrapper::processVideoProgrammatic() {
 
     int packetCount = 0;
     int emptyIterations = 0;
-    const int MAX_EMPTY_ITERATIONS = 1000;
+    // Use constant instead of local variable
 
     while (true) {
         if (interruptCallback_ && interruptCallback_()) {
@@ -670,7 +677,7 @@ bool FFmpegWrapper::processVideoProgrammatic() {
         if (packet->size <= 0) {
             emptyIterations++;
 
-            if (!streamInput_->isLiveStream() && emptyIterations >= MAX_EMPTY_ITERATIONS) {
+            if (!streamInput_->isLiveStream() && emptyIterations >= MAX_EMPTY_READ_ATTEMPTS) {
                 if (packetCount == 0) {
                     Logger::error("No packets received after waiting");
                     av_packet_free(&packet);
@@ -687,14 +694,14 @@ bool FFmpegWrapper::processVideoProgrammatic() {
         emptyIterations = 0;
         packetCount++;
 
-        if (packetCount % 100 == 0) {
+        if (packetCount % PACKET_LOG_INTERVAL == 0) {
             Logger::info("Processed " + std::to_string(packetCount) + " packets");
         }
 
         if (packet->stream_index == outputVideoStreamIndex_) {
             if (bsfCtx_) {
                 if (av_bsf_send_packet(bsfCtx_.get(), packet) < 0) {
-                    Logger::warn("Error sending video packet to bitstream filter");
+                    Logger::error("Error sending video packet to bitstream filter");
                     av_packet_unref(packet);
                     continue;
                 }
@@ -706,7 +713,7 @@ bool FFmpegWrapper::processVideoProgrammatic() {
                         outputFormatCtx_->streams[outputVideoStreamIndex_]->time_base);
 
                     if (av_interleaved_write_frame(outputFormatCtx_.get(), packet) < 0) {
-                        Logger::warn("Error writing video frame");
+                        Logger::error("Error writing video frame to HLS output");
                     }
 
                     av_packet_unref(packet);
@@ -718,7 +725,7 @@ bool FFmpegWrapper::processVideoProgrammatic() {
                     outputFormatCtx_->streams[outputVideoStreamIndex_]->time_base);
 
                 if (av_interleaved_write_frame(outputFormatCtx_.get(), packet) < 0) {
-                    Logger::warn("Error writing video frame");
+                    Logger::error("Error writing video frame to HLS output");
                 }
 
                 av_packet_unref(packet);
@@ -729,7 +736,7 @@ bool FFmpegWrapper::processVideoProgrammatic() {
                 outputFormatCtx_->streams[outputAudioStreamIndex_]->time_base);
 
             if (av_interleaved_write_frame(outputFormatCtx_.get(), packet) < 0) {
-                Logger::warn("Error writing audio frame");
+                Logger::error("Error writing audio frame to HLS output");
             }
 
             av_packet_unref(packet);
@@ -863,7 +870,7 @@ bool FFmpegWrapper::processVideoTranscode() {
 
         if (packet->stream_index == videoStreamIndex_) {
             if (avcodec_send_packet(inputCodecCtx_.get(), packet) < 0) {
-                Logger::warn("Error sending packet to decoder");
+                Logger::error("Error sending packet to decoder");
                 av_packet_unref(packet);
                 continue;
             }
@@ -871,7 +878,7 @@ bool FFmpegWrapper::processVideoTranscode() {
             while (avcodec_receive_frame(inputCodecCtx_.get(), frame) == 0) {
                 frameCount++;
 
-                if (frameCount % 100 == 0) {
+                if (frameCount % FRAME_LOG_INTERVAL == 0) {
                     Logger::info("Transcoded " + std::to_string(frameCount) + " frames");
                 }
 
@@ -887,7 +894,7 @@ bool FFmpegWrapper::processVideoTranscode() {
 
                     if (bsfCtx_) {
                         if (av_bsf_send_packet(bsfCtx_.get(), outPacket) < 0) {
-                            Logger::warn("Error sending packet to bitstream filter");
+                            Logger::error("Error sending packet to bitstream filter");
                             av_packet_unref(outPacket);
                             continue;
                         }
@@ -898,7 +905,7 @@ bool FFmpegWrapper::processVideoTranscode() {
                                 outputFormatCtx_->streams[0]->time_base);
 
                             if (av_interleaved_write_frame(outputFormatCtx_.get(), outPacket) < 0) {
-                                Logger::warn("Error writing frame");
+                                Logger::error("Error writing transcoded frame to HLS output");
                             }
 
                             av_packet_unref(outPacket);
@@ -909,7 +916,7 @@ bool FFmpegWrapper::processVideoTranscode() {
                             outputFormatCtx_->streams[0]->time_base);
 
                         if (av_interleaved_write_frame(outputFormatCtx_.get(), outPacket) < 0) {
-                            Logger::warn("Error writing frame");
+                            Logger::error("Error writing transcoded frame to HLS output");
                         }
 
                         av_packet_unref(outPacket);

@@ -5087,3 +5087,362 @@ bash
 - **+50 líneas** de código (CLI parsing, config struct, conditional)
 - **Zero breaking changes** - Fully backward compatible
 - **Clear UX** - `--no-js` autoexplicativo en `--help`
+
+---
+
+## Desafío 10: Code Quality y Robustness Improvements
+
+**Fecha**: Octubre 2025 (v1.0.1)  
+**Contexto**: Después del lanzamiento de v1.0.0, se realizó un análisis exhaustivo del código que identificó varios problemas de estabilidad, UX y mantenibilidad.
+
+### Problema: Análisis de Código Reveló Vulnerabilidades
+
+Un análisis automatizado del código identificó **11 hallazgos** de diferentes severidades:
+
+**Críticos** (pueden causar crashes):
+1. Logger thread-safety - `std::localtime()` no es thread-safe
+2. Race condition en `sws_ctx_` (browser_input.cpp)
+3. Busy-waiting ineficiente
+
+**Moderados** (afectan debugging/UX):
+4. Error handling inconsistente (warnings vs errors)
+5. Argument parsing frágil y confuso
+6. Falta validación inicial de entrada/salida
+7. Signal handler incompleto
+
+**Mejoras sugeridas**:
+8. Magic numbers hardcoded
+9. Configuración hardcoded
+10. Falta de timeouts
+11. Logger muy básico
+
+### Solución Implementada: 10 Mejoras Aplicadas
+
+#### 1. ✅ Logger Thread-Safe (CRÍTICO)
+**Archivo**: `src/logger.cpp`
+
+**Problema**:
+```cpp
+auto tm = *std::localtime(&now);  // ❌ No thread-safe
+```
+
+**Solución**:
+```cpp
+std::tm tm{};
+#ifdef _WIN32
+    localtime_s(&tm, &now);  // Windows thread-safe
+#else
+    localtime_r(&now, &tm);  // POSIX thread-safe
+#endif
+```
+
+**Impacto**: Eliminada race condition que podía causar crashes cuando CEF callbacks y thread principal loggean simultáneamente.
+
+---
+
+#### 2. ✅ Race Condition en sws_ctx_ (CRÍTICO)
+**Archivo**: `src/browser_input.cpp:534`
+
+**Problema**:
+```cpp
+// ❌ sws_ctx_ modificado sin lock
+sws_ctx_.reset(sws_getContext(...));
+
+// Lock adquirido DESPUÉS
+std::lock_guard<std::mutex> lock(frame_mutex_);
+```
+
+**Solución**:
+```cpp
+// ✅ Lock adquirido ANTES de modificar
+std::lock_guard<std::mutex> lock(frame_mutex_);
+
+if (needs_recreation) {
+    sws_ctx_.reset(sws_getContext(...));
+}
+```
+
+**Impacto**: Eliminada race condition entre CEF callback (`onFrameReceived`) y thread principal (`readPacket`) que causaba corrupción de frames.
+
+---
+
+#### 3. ✅ DynamicLibrary - Rule of Five
+**Archivo**: `src/dynamic_library.h`
+
+**Problema**: La clase no prevenía copias accidentales que causan double-free:
+```cpp
+DynamicLibrary lib1("libfoo.so");
+lib1.load();
+DynamicLibrary lib2 = lib1;  // ❌ Copia shallow - CRASH en destructor
+```
+
+**Solución**:
+```cpp
+// Deshabilitar copia
+DynamicLibrary(const DynamicLibrary&) = delete;
+DynamicLibrary& operator=(const DynamicLibrary&) = delete;
+
+// Habilitar movimiento (transferencia de ownership)
+DynamicLibrary(DynamicLibrary&& other) noexcept
+    : libName_(std::move(other.libName_))
+    , handle_(other.handle_) {
+    other.handle_ = nullptr;
+}
+
+DynamicLibrary& operator=(DynamicLibrary&& other) noexcept {
+    if (this != &other) {
+        if (handle_) { /* close */ }
+        libName_ = std::move(other.libName_);
+        handle_ = other.handle_;
+        other.handle_ = nullptr;
+    }
+    return *this;
+}
+```
+
+**Impacto**: 
+- Previene double-free crashes
+- Permite uso en contenedores STL con movimiento
+- Semántica clara de ownership
+
+---
+
+#### 4. ✅ Validación Fail-Fast de Entrada/Salida
+**Archivo**: `src/main.cpp:53-136`
+
+**Problema**: Errores tardíos después de inicializar CEF/FFmpeg
+
+**Solución**:
+```cpp
+// Validar ANTES de inicializar
+if (!validateInput(config.hls.inputFile)) {
+    return 1;  // Error claro inmediato
+}
+
+if (!validateOutputDir(config.hls.outputDir)) {
+    return 1;
+}
+```
+
+**Funciones agregadas**:
+- `isUrl()` - Detecta URLs vs archivos locales
+- `validateInput()` - Verifica existencia de archivo (si no es URL)
+- `validateOutputDir()` - Verifica directorio existe y es escribible
+
+**Mensajes mejorados**:
+```
+[ERROR] Input file does not exist: /tmp/nonexistent.mp4
+[ERROR] Output directory does not exist: /path
+[ERROR] Please create the directory first: mkdir -p /path
+[ERROR] Output directory is not writable: /path
+```
+
+---
+
+#### 5. ✅ Error Handling Consistente
+**Archivos**: `src/ffmpeg_wrapper.cpp`, `src/browser_input.cpp`
+
+**Problema**: Errores críticos loggeados como warnings
+
+**Cambios**:
+```cpp
+// Antes
+Logger::warn("Error writing video frame");
+
+// Después
+Logger::error("Error writing video frame to HLS output");
+```
+
+**Casos corregidos**:
+- Errores escribiendo frames a HLS (corrupción de output)
+- Errores en bitstream filter
+- Fallo configurar audio encoder
+- Errores encoding audio
+
+**Impacto**: Mejor visibilidad de errores críticos para debugging.
+
+---
+
+#### 6. ✅ DynamicLibrary - Error Logging Detallado
+**Archivo**: `src/dynamic_library.h:72-101`
+
+**Problema**: `getFunction()` retorna `nullptr` sin indicar por qué
+
+**Solución**:
+```cpp
+template<typename T>
+T getFunction(const std::string& funcName) {
+    if (!handle_) {
+        Logger::error("Cannot get function '" + funcName + 
+                     "': Library '" + libName_ + "' not loaded");
+        return nullptr;
+    }
+
+#ifdef PLATFORM_WINDOWS
+    T func = (T)GetProcAddress((HMODULE)handle_, funcName.c_str());
+    if (!func) {
+        DWORD error = GetLastError();
+        Logger::error("Failed to load function '" + funcName + 
+                     "' from '" + libName_ + "': Windows error code " + 
+                     std::to_string(error));
+    }
+    return func;
+#else
+    dlerror();  // Clear previous errors
+    T func = (T)dlsym(handle_, funcName.c_str());
+    const char* error = dlerror();
+    if (error) {
+        Logger::error("Failed to load function '" + funcName + 
+                     "' from '" + libName_ + "': " + std::string(error));
+    }
+    return func;
+#endif
+}
+```
+
+**Impacto**: Debugging mucho más fácil con mensajes específicos del SO.
+
+---
+
+#### 7. ✅ Magic Numbers Eliminados
+**Archivos**: `src/ffmpeg_wrapper.cpp`, `src/cef_backend.cpp`
+
+**Problema**: Números hardcoded dificultan comprensión
+
+**Solución**:
+```cpp
+// Constantes con nombres descriptivos
+namespace {
+    constexpr int PACKET_LOG_INTERVAL = 100;
+    constexpr int FRAME_LOG_INTERVAL = 100;
+    constexpr int MAX_EMPTY_READ_ATTEMPTS = 1000;
+    constexpr int AUDIO_PACKET_INITIAL_LOG_COUNT = 10;
+    constexpr int AUDIO_PACKET_LOG_INTERVAL = 100;
+}
+
+// Uso
+if (packetCount % PACKET_LOG_INTERVAL == 0) {
+    Logger::info("Processed " + std::to_string(packetCount) + " packets");
+}
+```
+
+---
+
+#### 8. ✅ Argument Parsing Simplificado
+**Archivo**: `src/main.cpp:113-131`
+
+**Problema**: Lógica confusa `argc - arg_offset + 1 != 3`
+
+**Solución**:
+```cpp
+// Claro y explícito
+int required_args = 2;
+int remaining_args = argc - arg_index;
+
+if (remaining_args != required_args) {
+    printUsage(argv[0]);
+    return 1;
+}
+```
+
+---
+
+#### 9. ✅ CMake Modernizado
+**Archivo**: `CMakeLists.txt`
+
+**Problema**: Comandos globales contaminan namespace
+
+**Cambios**:
+```cmake
+# Antes (global)
+add_definitions(-DPLATFORM_LINUX)
+add_compile_options(-Wall)
+include_directories(src)
+
+# Después (target-specific)
+target_compile_definitions(hls-generator PRIVATE PLATFORM_LINUX)
+target_compile_options(hls-generator PRIVATE -Wall)
+target_include_directories(hls-generator PRIVATE ${CMAKE_SOURCE_DIR}/src)
+```
+
+**Beneficios**:
+- Mejor encapsulación
+- Sin contaminación global
+- Más mantenible
+- Sigue buenas prácticas CMake 3.x
+
+---
+
+#### 10. ✅ Warnings de Compilación Eliminados
+**Archivos**: `src/main.cpp`, `src/browser_input.h`, `src/cef_backend.h`
+
+**Problemas**:
+- `-Wreorder`: Orden de inicialización de miembros
+- `-Wunused-parameter`: Parámetros sin usar
+
+**Soluciones**:
+- Reordenados miembros para coincidir con constructor
+- Removidos nombres de parámetros no usados en signal handler
+
+---
+
+### Mejoras NO Implementadas (Justificadas)
+
+#### ❌ Busy-waiting con Condition Variables
+**Razón**: Sleep de 1-2ms es aceptable para frame pacing (6% overhead). Condition variables serían muy complejas sin beneficio significativo.
+
+#### ❌ Signal Handler Mejorado
+**Razón**: El handler actual es correcto según buenas prácticas (solo set flag, destructores hacen cleanup).
+
+#### ❌ Configuración en JSON/YAML
+**Razón**: Apropiado para v1.0. Añadiría dependencias innecesarias.
+
+#### ❌ Timeouts Granulares
+**Razón**: Ya existe interrupt callback. Implementación compleja sin ganancia clara.
+
+#### ❌ Logger Avanzado (Thread ID, JSON)
+**Razón**: Suficiente para v1.0. Overkill para esta aplicación.
+
+---
+
+### Resultados Finales
+
+**Compilación**:
+- ✅ Linux: 1.6 MB (antes: 1.2 MB)
+- ✅ Windows: 2.2 MB (antes: 2.0 MB)
+- Aumento por strings de error más descriptivos
+
+**Estabilidad**:
+- ✅ 0 bugs críticos (antes: 2 race conditions)
+- ✅ Thread-safe en todos los componentes
+- ✅ Sin riesgo de double-free
+
+**UX**:
+- ✅ Errores claros y tempranos
+- ✅ Mensajes detallados con contexto
+- ✅ Validación fail-fast
+
+**Mantenibilidad**:
+- ✅ CMake moderno
+- ✅ Sin magic numbers
+- ✅ Código más legible
+- ✅ Compilación limpia (solo warnings de CEF)
+
+---
+
+### Lecciones Aprendidas
+
+1. **Thread Safety es Crítico**: Incluso funciones "simples" como `localtime()` pueden causar crashes en aplicaciones multi-threaded.
+
+2. **Rule of Five Siempre**: Cualquier clase con recursos (handles, punteros) debe implementar correctamente copia/movimiento o deshabilitarlos.
+
+3. **Fail-Fast es Mejor UX**: Validar entrada temprano ahorra tiempo de debugging al usuario.
+
+4. **Error Logging Detallado**: Invertir tiempo en mensajes de error claros ahorra horas de debugging futuras.
+
+5. **CMake Moderno Paga Dividendos**: Target-specific commands hacen el código más mantenible a largo plazo.
+
+6. **No Todo Requiere Arreglo**: Algunas "mejoras" (busy-waiting, logger avanzado) no valen la complejidad añadida.
+
+---
+

@@ -32,6 +32,12 @@
 #include <sys/file.h> // for flock()
 #endif
 
+// Constants for audio packet logging
+namespace {
+    constexpr int AUDIO_PACKET_INITIAL_LOG_COUNT = 10;  // Log first N audio packets
+    constexpr int AUDIO_PACKET_LOG_INTERVAL = 100;      // Then log every N packets
+}
+
 // Simple app to configure command-line switches (OBS-style, multi-process with CEF standalone)
 class SimpleApp : public CefApp {
 public:
@@ -212,10 +218,10 @@ private:
 };
 
 CEFBackend::CEFBackend()
-    : browser_(nullptr)
-    , client_(nullptr)
-    , width_(1280)
+    : width_(1280)
     , height_(720)
+    , browser_(nullptr)
+    , client_(nullptr)
     , page_loaded_(false)
     , initialized_(false)
     , page_reloaded_(false)
@@ -705,7 +711,7 @@ void CEFBackend::onAudioStreamPacket(const float** data, int frames, int channel
     // Log packet reception
     static int packet_count = 0;
     packet_count++;
-    if (packet_count <= 10 || packet_count % 100 == 0) {
+    if (packet_count <= AUDIO_PACKET_INITIAL_LOG_COUNT || packet_count % AUDIO_PACKET_LOG_INTERVAL == 0) {
         Logger::info("CEF audio packet #" + std::to_string(packet_count) +
                    ": " + std::to_string(frames) + " frames (" + std::to_string(total_samples) + " samples total), " +
                    "buffer_size=" + std::to_string(audio_buffer_.size()) +
