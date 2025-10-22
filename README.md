@@ -298,6 +298,27 @@ hls-generator/
 
 ## Recent Updates
 
+### v1.2.0 (2025-10-22): Dynamic FFmpeg Version Detection 🔮
+Future-proof FFmpeg library detection to prevent breakage when OBS updates.
+
+**What's New:**
+- ✅ **Dynamic FFmpeg scanning** - Automatically detects any FFmpeg version (59, 60, 61, 62, 63+)
+- ✅ **No more hardcoded versions** - Scans directories for `avformat-*.dll` / `libavformat.so.*`
+- ✅ **Fast-path optimization** - Checks known versions first, falls back to dynamic scan
+- ✅ **Better logging** - Shows exact FFmpeg version detected (e.g., "libavformat.so.61")
+- ✅ **Zero runtime impact** - Detection happens once at startup
+
+**Technical Details:**
+- Added `findFFmpegLibraries()` - Platform-specific directory scanning (Windows: `FindFirstFile`, Linux: `opendir`)
+- Added `hasFFmpegLibraries()` - Two-phase check (known versions → dynamic scan)
+- Updated all detection functions: `detectLinux()`, `detectWindows()`, `detectSystemFFmpeg()`
+
+**Impact**: Future OBS updates won't break the project. Backwards compatible with FFmpeg 59+.
+
+See [DEVELOPMENT-JOURNEY.md](docs/DEVELOPMENT-JOURNEY.md#desafío-11-dynamic-ffmpeg-version-detection-v120) for complete technical details.
+
+---
+
 ### v1.1.0 (2025-10-22): Code Quality & Robustness Release 🔒
 Major improvements focusing on stability, security, and maintainability.
 

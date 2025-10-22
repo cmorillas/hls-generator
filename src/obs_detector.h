@@ -24,6 +24,10 @@ private:
     static OBSPaths detectSystemFFmpeg();
     static bool fileExists(const std::string& path);
     static bool directoryExists(const std::string& path);
+
+    // Dynamic FFmpeg library version detection
+    static std::vector<std::string> findFFmpegLibraries(const std::string& dir);
+    static bool hasFFmpegLibraries(const std::string& dir);
 };
 
 #endif // OBS_DETECTOR_H

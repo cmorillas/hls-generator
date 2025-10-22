@@ -1,6 +1,9 @@
 #include "obs_detector.h"
 #include "logger.h"
 #include <sys/stat.h>
+#include <vector>
+#include <algorithm>
+#include <regex>
 
 #ifdef PLATFORM_WINDOWS
 #include <windows.h>
@@ -8,6 +11,7 @@
 #else
 #include <unistd.h>
 #include <limits.h>
+#include <dirent.h>
 #endif
 
 bool OBSDetector::fileExists(const std::string& path) {
@@ -18,6 +22,77 @@ bool OBSDetector::fileExists(const std::string& path) {
 bool OBSDetector::directoryExists(const std::string& path) {
     struct stat buffer;
     return (stat(path.c_str(), &buffer) == 0 && S_ISDIR(buffer.st_mode));
+}
+
+// Scan directory for FFmpeg libraries with any version
+std::vector<std::string> OBSDetector::findFFmpegLibraries(const std::string& dir) {
+    std::vector<std::string> foundLibs;
+
+#ifdef PLATFORM_WINDOWS
+    // Scan for avformat-*.dll
+    WIN32_FIND_DATAA findData;
+    HANDLE hFind = FindFirstFileA((dir + "\\avformat-*.dll").c_str(), &findData);
+
+    if (hFind != INVALID_HANDLE_VALUE) {
+        do {
+            std::string fileName = findData.cFileName;
+            foundLibs.push_back(fileName);
+        } while (FindNextFileA(hFind, &findData));
+        FindClose(hFind);
+    }
+
+    // Also check for unversioned avformat.dll
+    if (fileExists(dir + "\\avformat.dll")) {
+        foundLibs.push_back("avformat.dll");
+    }
+#else
+    // Scan for libavformat.so.*
+    DIR* d = opendir(dir.c_str());
+    if (d) {
+        struct dirent* entry;
+        while ((entry = readdir(d)) != nullptr) {
+            std::string name = entry->d_name;
+            // Match libavformat.so.XX pattern
+            if (name.find("libavformat.so.") == 0) {
+                foundLibs.push_back(name);
+            }
+        }
+        closedir(d);
+    }
+
+    // Also check for unversioned libavformat.so
+    if (fileExists(dir + "/libavformat.so")) {
+        foundLibs.push_back("libavformat.so");
+    }
+#endif
+
+    // Sort by version (descending) - newer versions first
+    // This ensures we try the latest version available
+    std::sort(foundLibs.begin(), foundLibs.end(), std::greater<std::string>());
+
+    return foundLibs;
+}
+
+// Check if a directory contains FFmpeg libraries (any version)
+bool OBSDetector::hasFFmpegLibraries(const std::string& dir) {
+    // First try known versions (fast path)
+    const std::vector<int> knownVersions = {62, 61, 60, 59};
+
+    for (int ver : knownVersions) {
+#ifdef PLATFORM_WINDOWS
+        if (fileExists(dir + "\\avformat-" + std::to_string(ver) + ".dll")) {
+            return true;
+        }
+#else
+        if (fileExists(dir + "/libavformat.so." + std::to_string(ver))) {
+            return true;
+        }
+#endif
+    }
+
+    // Fallback: scan for any version
+    auto libs = findFFmpegLibraries(dir);
+    return !libs.empty();
 }
 
 OBSPaths OBSDetector::detect() {
@@ -95,13 +170,17 @@ OBSPaths OBSDetector::detectLinux() {
     };
 
     for (const auto& path : ffmpegPaths) {
-        std::string avcodecPath = path + "/libavcodec.so";
-        std::string avformatPath = path + "/libavformat.so";
-        std::string avutilPath = path + "/libavutil.so";
-
-        if (fileExists(avcodecPath) || fileExists(avcodecPath + ".61")) {
+        // Use dynamic version detection instead of hardcoded versions
+        if (hasFFmpegLibraries(path)) {
             paths.ffmpegLibDir = path;
-            Logger::info("FFmpeg libraries found in: " + path);
+
+            // Log which FFmpeg libraries were found
+            auto foundLibs = findFFmpegLibraries(path);
+            if (!foundLibs.empty()) {
+                Logger::info("FFmpeg libraries found in: " + path + " (" + foundLibs[0] + ")");
+            } else {
+                Logger::info("FFmpeg libraries found in: " + path);
+            }
 
             // 4. Set CEF paths if OBS plugin directory was found
             if (!paths.obsLibDir.empty()) {
@@ -150,29 +229,26 @@ OBSPaths OBSDetector::detectWindows() {
 
             Logger::info("OBS Studio found: " + obsDir);
 
-            // Verify FFmpeg DLLs exist (try different versions)
-            std::vector<std::string> avcodecVersions = {
-                paths.ffmpegLibDir + "\\avcodec-61.dll",  // FFmpeg 6.1/7.0
-                paths.ffmpegLibDir + "\\avcodec-62.dll",  // FFmpeg 7.1 (future)
-                paths.ffmpegLibDir + "\\avcodec-60.dll",  // FFmpeg 6.0
-                paths.ffmpegLibDir + "\\avcodec.dll"      // Generic
-            };
-
-            for (const auto& avcodecDll : avcodecVersions) {
-                if (fileExists(avcodecDll)) {
+            // Use dynamic version detection instead of hardcoded versions
+            if (hasFFmpegLibraries(paths.ffmpegLibDir)) {
+                // Log which FFmpeg libraries were found
+                auto foundLibs = findFFmpegLibraries(paths.ffmpegLibDir);
+                if (!foundLibs.empty()) {
+                    Logger::info("FFmpeg libraries found in: " + paths.ffmpegLibDir + " (" + foundLibs[0] + ")");
+                } else {
                     Logger::info("FFmpeg libraries found in: " + paths.ffmpegLibDir);
-
-                    // Set CEF paths for Windows
-                    // In Windows, CEF DLL is in obs-plugins\64bit directory (NOT bin\64bit)
-                    paths.cef_path = paths.obsLibDir;
-                    // obs-browser-page.exe is also in the obs-plugins directory
-                    paths.subprocess_path = paths.obsLibDir + "\\obs-browser-page.exe";
-                    Logger::info("CEF path: " + paths.cef_path);
-                    Logger::info("CEF subprocess: " + paths.subprocess_path);
-
-                    paths.found = true;
-                    return paths;
                 }
+
+                // Set CEF paths for Windows
+                // In Windows, CEF DLL is in obs-plugins\64bit directory (NOT bin\64bit)
+                paths.cef_path = paths.obsLibDir;
+                // obs-browser-page.exe is also in the obs-plugins directory
+                paths.subprocess_path = paths.obsLibDir + "\\obs-browser-page.exe";
+                Logger::info("CEF path: " + paths.cef_path);
+                Logger::info("CEF subprocess: " + paths.subprocess_path);
+
+                paths.found = true;
+                return paths;
             }
         }
     }
@@ -197,16 +273,18 @@ OBSPaths OBSDetector::detectSystemFFmpeg() {
     };
 
     for (const auto& dir : ffmpegDirs) {
-        if (directoryExists(dir)) {
-            // Check if avformat DLL exists
-            if (fileExists(dir + "\\avformat-61.dll") ||
-                fileExists(dir + "\\avformat-60.dll") ||
-                fileExists(dir + "\\avformat.dll")) {
-                paths.ffmpegLibDir = dir;
-                paths.found = true;
+        if (directoryExists(dir) && hasFFmpegLibraries(dir)) {
+            paths.ffmpegLibDir = dir;
+            paths.found = true;
+
+            // Log which FFmpeg libraries were found
+            auto foundLibs = findFFmpegLibraries(dir);
+            if (!foundLibs.empty()) {
+                Logger::info("FFmpeg found: " + dir + " (" + foundLibs[0] + ")");
+            } else {
                 Logger::info("FFmpeg found: " + dir);
-                break;
             }
+            break;
         }
     }
 #else
@@ -219,16 +297,18 @@ OBSPaths OBSDetector::detectSystemFFmpeg() {
     };
 
     for (const auto& dir : ffmpegDirs) {
-        if (directoryExists(dir)) {
-            // Check if libavformat exists (any version)
-            if (fileExists(dir + "/libavformat.so.61") ||
-                fileExists(dir + "/libavformat.so.60") ||
-                fileExists(dir + "/libavformat.so")) {
-                paths.ffmpegLibDir = dir;
-                paths.found = true;
+        if (directoryExists(dir) && hasFFmpegLibraries(dir)) {
+            paths.ffmpegLibDir = dir;
+            paths.found = true;
+
+            // Log which FFmpeg libraries were found
+            auto foundLibs = findFFmpegLibraries(dir);
+            if (!foundLibs.empty()) {
+                Logger::info("FFmpeg found: " + dir + " (" + foundLibs[0] + ")");
+            } else {
                 Logger::info("FFmpeg found: " + dir);
-                break;
             }
+            break;
         }
     }
 #endif

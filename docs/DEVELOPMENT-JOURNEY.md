@@ -5446,3 +5446,193 @@ target_include_directories(hls-generator PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
 ---
 
+## Desafío 11: Dynamic FFmpeg Version Detection (v1.2.0)
+
+**Fecha**: Octubre 2025
+**Objetivo**: Hacer el proyecto resistente a actualizaciones de FFmpeg en OBS Studio
+
+### El Problema
+
+El código tenía versiones hardcodeadas de FFmpeg:
+
+```cpp
+// Búsqueda con versiones hardcodeadas
+std::vector<std::string> avcodecVersions = {
+    paths.ffmpegLibDir + "\\avcodec-61.dll",  // FFmpeg 6.1/7.0
+    paths.ffmpegLibDir + "\\avcodec-62.dll",  // FFmpeg 7.1
+    paths.ffmpegLibDir + "\\avcodec-60.dll",  // FFmpeg 6.0
+    paths.ffmpegLibDir + "\\avcodec.dll"      // Generic
+};
+```
+
+**Problema**: Cuando OBS actualiza FFmpeg (ej: de versión 61 → 62 → 63), el proyecto deja de funcionar.
+
+### La Solución: Detección Dinámica
+
+Implementamos escaneo dinámico de directorios con dos fases:
+
+#### 1. Funciones Helper Añadidas
+
+**`findFFmpegLibraries(dir)`** - Escanea directorio en busca de cualquier versión:
+
+```cpp
+std::vector<std::string> OBSDetector::findFFmpegLibraries(const std::string& dir) {
+    std::vector<std::string> foundLibs;
+
+#ifdef PLATFORM_WINDOWS
+    WIN32_FIND_DATAA findData;
+    HANDLE hFind = FindFirstFileA((dir + "\\avformat-*.dll").c_str(), &findData);
+    if (hFind != INVALID_HANDLE_VALUE) {
+        do {
+            foundLibs.push_back(findData.cFileName);
+        } while (FindNextFileA(hFind, &findData));
+        FindClose(hFind);
+    }
+    // También buscar versión sin número
+    if (fileExists(dir + "\\avformat.dll")) {
+        foundLibs.push_back("avformat.dll");
+    }
+#else
+    // Linux: usar opendir/readdir
+    DIR* d = opendir(dir.c_str());
+    if (d) {
+        struct dirent* entry;
+        while ((entry = readdir(d)) != nullptr) {
+            std::string name = entry->d_name;
+            if (name.find("libavformat.so.") == 0) {
+                foundLibs.push_back(name);
+            }
+        }
+        closedir(d);
+    }
+    if (fileExists(dir + "/libavformat.so")) {
+        foundLibs.push_back("libavformat.so");
+    }
+#endif
+
+    // Ordenar descendente para probar versiones más nuevas primero
+    std::sort(foundLibs.begin(), foundLibs.end(), std::greater<std::string>());
+    return foundLibs;
+}
+```
+
+**`hasFFmpegLibraries(dir)`** - Verifica existencia con optimización:
+
+```cpp
+bool OBSDetector::hasFFmpegLibraries(const std::string& dir) {
+    // FAST PATH: Probar versiones conocidas primero (evita escaneo)
+    const std::vector<int> knownVersions = {62, 61, 60, 59};
+
+    for (int ver : knownVersions) {
+#ifdef PLATFORM_WINDOWS
+        if (fileExists(dir + "\\avformat-" + std::to_string(ver) + ".dll")) {
+            return true;
+        }
+#else
+        if (fileExists(dir + "/libavformat.so." + std::to_string(ver))) {
+            return true;
+        }
+#endif
+    }
+
+    // SLOW PATH: Si no se encuentra versión conocida, escanear dinámicamente
+    auto libs = findFFmpegLibraries(dir);
+    return !libs.empty();
+}
+```
+
+#### 2. Actualización de Funciones de Detección
+
+**Antes** (Linux):
+```cpp
+if (fileExists(avcodecPath) || fileExists(avcodecPath + ".61")) {
+    paths.ffmpegLibDir = path;
+    Logger::info("FFmpeg libraries found in: " + path);
+    // ...
+}
+```
+
+**Después** (Linux):
+```cpp
+if (hasFFmpegLibraries(path)) {
+    paths.ffmpegLibDir = path;
+
+    // Logging mejorado: mostrar qué versión se encontró
+    auto foundLibs = findFFmpegLibraries(path);
+    if (!foundLibs.empty()) {
+        Logger::info("FFmpeg libraries found in: " + path + " (" + foundLibs[0] + ")");
+    }
+    // ...
+}
+```
+
+Las mismas mejoras se aplicaron a:
+- `detectLinux()` - [obs_detector.cpp:172-197](src/obs_detector.cpp#L172-L197)
+- `detectWindows()` - [obs_detector.cpp:232-252](src/obs_detector.cpp#L232-L252)
+- `detectSystemFFmpeg()` - [obs_detector.cpp:275-313](src/obs_detector.cpp#L275-L313)
+
+#### 3. Headers Actualizados
+
+[obs_detector.h:29-30](src/obs_detector.h#L29-L30):
+```cpp
+// Dynamic FFmpeg library version detection
+static std::vector<std::string> findFFmpegLibraries(const std::string& dir);
+static bool hasFFmpegLibraries(const std::string& dir);
+```
+
+### Ventajas de la Solución
+
+✅ **Future-proof**: Automáticamente detecta versiones 63, 64, 65+
+✅ **Performance**: Fast-path para versiones conocidas evita escaneo innecesario
+✅ **Backwards Compatible**: Sigue funcionando con FFmpeg 59, 60, 61
+✅ **Mejor Diagnóstico**: Logs muestran versión exacta encontrada
+✅ **Zero Runtime Impact**: La detección solo ocurre una vez al iniciar
+
+### Resultados de Compilación
+
+```bash
+# Linux
+cmake --build build
+[100%] Built target hls-generator
+Binary size: 1.6 MB
+
+# Windows (cross-compilation)
+cmake --build build-windows
+[100%] Built target hls-generator
+Binary size: 2.2 MB
+```
+
+### Ejemplo de Logs Mejorados
+
+**Antes**:
+```
+[INFO] FFmpeg libraries found in: /usr/lib/x86_64-linux-gnu
+```
+
+**Después**:
+```
+[INFO] FFmpeg libraries found in: /usr/lib/x86_64-linux-gnu (libavformat.so.61)
+```
+
+Ahora el usuario sabe exactamente qué versión de FFmpeg se está usando.
+
+### Archivos Modificados
+
+1. [src/obs_detector.h](src/obs_detector.h) - Declaraciones de nuevas funciones helper
+2. [src/obs_detector.cpp](src/obs_detector.cpp) - Implementación completa con escaneo dinámico
+3. [CMakeLists.txt](CMakeLists.txt) - Versión actualizada a 1.2.0
+
+### Lecciones Aprendidas
+
+1. **No Hardcodear Versiones**: Cualquier dependencia externa puede actualizarse. Usar detección dinámica cuando sea posible.
+
+2. **Fast Path + Slow Path**: Optimizar el caso común (versiones conocidas) pero tener fallback robusto.
+
+3. **Platform-Specific APIs**: Usar APIs nativas (`FindFirstFile` vs `opendir`) para mejor rendimiento.
+
+4. **Logging es Documentación**: Buenos mensajes de log ayudan a entender qué está pasando en producción.
+
+5. **Ordenar Resultados Importa**: Probar versiones más nuevas primero aumenta compatibilidad.
+
+---
+
