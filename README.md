@@ -1,5 +1,9 @@
 # HLS Generator
 
+[![Version](https://img.shields.io/github/v/release/cmorillas/hls-generator)](https://github.com/cmorillas/hls-generator/releases)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/cmorillas/hls-generator)
+
 HLS stream generator from video files and browser sources, using FFmpeg and CEF libraries included in OBS Studio via **dynamic runtime loading**.
 
 ## Features
@@ -293,6 +297,30 @@ hls-generator/
 - [docs/README.md](docs/README.md) - Full documentation index
 
 ## Recent Updates
+
+### v1.1.0 (2025-10-22): Code Quality & Robustness Release 🔒
+Major improvements focusing on stability, security, and maintainability.
+
+**Critical Fixes:**
+- ✅ **Logger thread-safety** - Fixed race condition using `localtime_r()`/`localtime_s()`
+- ✅ **Race condition in sws_ctx_** - Eliminated frame corruption in browser capture
+- ✅ **DynamicLibrary Rule of Five** - Prevents double-free bugs, enables move semantics
+
+**UX & Debugging:**
+- ✅ **Fail-fast validation** - Early input/output validation with clear error messages
+- ✅ **Consistent error handling** - Critical errors now logged as errors (not warnings)
+- ✅ **Detailed error logging** - DynamicLibrary reports OS-specific errors (`dlerror()`/`GetLastError()`)
+
+**Code Quality:**
+- ✅ **Eliminated magic numbers** - Replaced with descriptive constants
+- ✅ **Modernized CMake** - Target-specific commands instead of global
+- ✅ **Simplified argument parsing** - Clear and explicit logic
+
+**Impact**: 0 critical bugs (was: 2 race conditions), complete thread safety, better debugging with detailed error messages.
+
+See [DEVELOPMENT-JOURNEY.md](docs/DEVELOPMENT-JOURNEY.md#desafío-10-code-quality-y-robustness-improvements) for complete technical details.
+
+---
 
 ### 2025-10-22: CEF Scripts Architecture Refactoring (Desafío 14)
 - ✅ **Refactored JavaScript injection** - Moved from embedded C++ strings to external `.js` files
