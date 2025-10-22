@@ -1,0 +1,77 @@
+# Build directories
+build/
+build-*/
+*.o
+*.a
+*.so
+*.dll
+*.exe
+*.dylib
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake
+!CMakeLists.txt
+!toolchain-*.cmake
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Claude Code and IDE
+.claude/
+.vscode/
+.idea/
+
+# Compiled binaries
+hls-generator
+hls-generator.exe
+
+# Test output and temporary files
+tmp/
+*.ts
+*.m3u8
+output/
+hls_output/
+test_output/
+
+# Logs
+*.log
+
+# Distribution files
+# Binaries should be distributed via GitHub Releases, not committed to repo
+dist/
+release/
+# Allow specific distribution archives
+!dist/*.zip
+!dist/*.tar.gz
+*.deb
+*.rpm
+*.AppImage
+
+# External dependencies (downloaded, not in repo)
+external/ffmpeg/
+
+# OS specific
+Thumbs.db
+.directory
+
+# Backup files
+*.bak
+*.orig
+*~
+
+# Debug symbols
+*.pdb
+*.dSYM/
+
+# Core dumps
+core
+core.*
