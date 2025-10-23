@@ -25,19 +25,37 @@ bool HLSGenerator::initialize(const std::string& ffmpegLibPath) {
     // STEP 2: Parallelize openInput() and setupOutput() (they are independent)
     std::atomic<bool> outputSetupSuccess(false);
     std::atomic<bool> inputOpenSuccess(false);
+    std::atomic<bool> outputThreadException(false);
+    std::atomic<bool> inputThreadException(false);
 
     // Thread 1: Setup output (fast, ~100ms)
     std::thread outputThread([&]() {
-        Logger::info(">>> Setting up HLS output in parallel...");
-        outputSetupSuccess = ffmpegWrapper_->setupOutput();
-        Logger::info(">>> HLS output setup completed");
+        try {
+            Logger::info(">>> Setting up HLS output in parallel...");
+            outputSetupSuccess = ffmpegWrapper_->setupOutput();
+            Logger::info(">>> HLS output setup completed");
+        } catch (const std::exception& e) {
+            Logger::error("Exception in setupOutput thread: " + std::string(e.what()));
+            outputThreadException = true;
+        } catch (...) {
+            Logger::error("Unknown exception in setupOutput thread");
+            outputThreadException = true;
+        }
     });
 
     // Thread 2: Open input (slow, ~10-15s with CEF)
     std::thread inputThread([&]() {
-        Logger::info(">>> Opening input in parallel...");
-        inputOpenSuccess = ffmpegWrapper_->openInput(config_.hls.inputFile);
-        Logger::info(">>> Input open completed");
+        try {
+            Logger::info(">>> Opening input in parallel...");
+            inputOpenSuccess = ffmpegWrapper_->openInput(config_.hls.inputFile);
+            Logger::info(">>> Input open completed");
+        } catch (const std::exception& e) {
+            Logger::error("Exception in openInput thread: " + std::string(e.what()));
+            inputThreadException = true;
+        } catch (...) {
+            Logger::error("Unknown exception in openInput thread");
+            inputThreadException = true;
+        }
     });
 
     // STEP 3: Wait for both threads
@@ -45,6 +63,16 @@ bool HLSGenerator::initialize(const std::string& ffmpegLibPath) {
     inputThread.join();
 
     // STEP 4: Check results
+    if (outputThreadException) {
+        Logger::error("Exception occurred in setupOutput thread");
+        return false;
+    }
+
+    if (inputThreadException) {
+        Logger::error("Exception occurred in openInput thread");
+        return false;
+    }
+
     if (!outputSetupSuccess) {
         Logger::error("Failed to setup HLS output");
         return false;
