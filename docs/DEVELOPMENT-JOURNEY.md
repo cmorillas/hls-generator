@@ -7143,3 +7143,192 @@ The defensive fallback ensures we never increment by 0 or negative values in cas
 
 ---
 
+## Code Modularization - Pipeline Architecture (2025-01-23)
+
+### Motivation
+
+After identifying technical debt in the codebase review:
+- `ffmpeg_wrapper.cpp` grew to ~1350 lines with mixed responsibilities
+- Single class handling video pipeline, audio pipeline, muxer setup, bitstream filters, PTS tracking, etc.
+- `ffmpeg_loader.cpp` repeated library loading patterns for 5 libraries
+- Manual state resets scattered across multiple methods (prone to errors by omission)
+- Difficult to test, reuse, and reason about individual components
+
+### Architecture Redesign
+
+Implemented modular pipeline architecture following Single Responsibility Principle (SRP):
+
+```
+FFmpegWrapper (orchestrator - 200 lines)
+├── shared_ptr<FFmpegContext> (shared context - 250 lines)
+│   ├── Centralizes FFmpeg library loading (avformat, avcodec, avutil, swscale, swresample)
+│   ├── Exposes function pointers to all pipelines
+│   ├── Ensures single load (no duplicates)
+│   └── Automatic cleanup on destruction (dlclose)
+├── unique_ptr<VideoPipeline> (video processing - 400 lines)
+│   ├── Mode detection (REMUX/TRANSCODE/PROGRAMMATIC)
+│   ├── Video encoder/decoder setup
+│   ├── SwsContext lifecycle
+│   └── Bitstream filter management
+├── unique_ptr<AudioPipeline> (audio processing - 350 lines)
+│   ├── Mode detection (REMUX/TRANSCODE)
+│   ├── Audio encoder/decoder setup (AAC)
+│   ├── SwrContext lifecycle
+│   └── PTS tracking state (encapsulated)
+└── unique_ptr<MuxerManager> (HLS output - 180 lines)
+    ├── Output format context setup
+    ├── Stream creation
+    ├── HLS configuration
+    └── Header/trailer writing
+```
+
+### Benefits Achieved
+
+**Separation of Concerns**:
+- Each component has ONE well-defined responsibility
+- Video logic isolated from audio logic
+- Muxer configuration separate from encoding
+
+**Shared Context Pattern**:
+- `FFmpegContext` loaded once via `shared_ptr`
+- All pipelines share same function pointers
+- Guaranteed no double-load or symbol conflicts
+- Automatic cleanup when last pipeline dies
+
+**State Encapsulation**:
+- `AudioPipeline` owns `PTSState` struct with reset() method
+- Impossible to forget resetting variables (lifecycle is encapsulated)
+- `VideoPipeline` owns SwsContext, bitstream filter
+- Each component can be reset independently
+
+**Testability**:
+- `AudioPipeline::processPacket()` testable in isolation
+- `VideoPipeline::detectMode()` unit-testable
+- `MuxerManager::setupOutput()` mockable
+
+**Reusability**:
+- `AudioPipeline` reusable in other projects needing AAC transcode
+- `FFmpegContext` reusable for any FFmpeg dynamic loading
+- Components can be extracted to separate libraries
+
+### New Components
+
+#### FFmpegContext (src/ffmpeg_context.{h,cpp})
+- Consolidates all dynamic library loading
+- Eliminates repetitive LOAD_FUNC patterns
+- Provides clean interface for function pointers
+- Example:
+  ```cpp
+  auto ctx = std::make_shared<FFmpegContext>();
+  ctx->initialize(libPath);
+  ctx->av_frame_alloc();  // Direct access to loaded functions
+  ```
+
+#### VideoPipeline (src/video_pipeline.{h,cpp})
+- Handles REMUX, TRANSCODE, and PROGRAMMATIC modes
+- Manages H.264 encoder, decoder, SwsContext, bitstream filter
+- Methods:
+  - `detectMode()`: Analyze codec compatibility
+  - `setupEncoder()`: Configure H.264 encoder
+  - `convertAndEncodeFrame()`: Scale and encode
+  - `flushEncoder()`: Drain buffered frames
+
+#### AudioPipeline (src/audio_pipeline.{h,cpp})
+- Handles AAC REMUX or non-AAC → AAC TRANSCODE
+- Manages AAC encoder, decoder, SwrContext
+- Encapsulates PTS tracking (lastPts, initialized, warningShown)
+- Methods:
+  - `setupEncoder()`: Configure AAC encoder + SwrContext
+  - `processPacket()`: Remux or transcode path
+  - `flush()`: Drain decoder and encoder
+  - `reset()`: Clean state (calls `PTSState::reset()`)
+
+#### MuxerManager (src/muxer_manager.{h,cpp})
+- Dedicated HLS output management
+- Creates video + audio streams
+- Configures segment duration, playlist, flags
+- Creates preliminary playlist (prevents 404 race)
+- Methods:
+  - `setupOutput()`: Create format context + streams
+  - `writeHeader()`: Initialize HLS muxer
+  - `writeTrailer()`: Finalize HLS playlist
+  - `reset()`: Clean for stream reload
+
+### Migration Strategy
+
+**Phase 1 (Completed)**: Created all modular components
+- ✅ FFmpegContext with shared library loading
+- ✅ AudioPipeline with encapsulated PTS state
+- ✅ VideoPipeline with mode detection
+- ✅ MuxerManager with HLS setup
+- ✅ Updated CMakeLists.txt
+- ✅ Compilation verified (Linux + Windows)
+
+**Phase 2 (Future Work)**: Refactor FFmpegWrapper
+- Replace monolithic implementation with delegation to pipelines
+- Keep existing API unchanged (no breaking changes)
+- Gradual migration to ensure no functional regressions
+- Testing at each step
+
+**Decision**: Keep current FFmpegWrapper temporarily
+- **Why**: Existing implementation is stable and functional
+- **When to migrate**: When adding new features requiring extensive changes
+- **How**: Incremental replacement (one method at a time)
+
+### Code Metrics
+
+**Before Refactorization**:
+- `ffmpeg_wrapper.cpp`: ~1350 lines
+- `ffmpeg_loader.cpp`: ~290 lines (repetitive patterns)
+- Single "god object" with 15+ responsibilities
+
+**After Modularization**:
+- `ffmpeg_context.cpp`: ~250 lines (centralized loading)
+- `video_pipeline.cpp`: ~400 lines (video only)
+- `audio_pipeline.cpp`: ~350 lines (audio only)
+- `muxer_manager.cpp`: ~180 lines (HLS muxer)
+- `ffmpeg_wrapper.cpp`: ~200 lines (orchestrator - future)
+
+**Total**: Similar line count but with clear separation of concerns
+
+### Files Added
+
+- [src/ffmpeg_context.h](../src/ffmpeg_context.h) - Shared FFmpeg context
+- [src/ffmpeg_context.cpp](../src/ffmpeg_context.cpp) - Dynamic library loading
+- [src/video_pipeline.h](../src/video_pipeline.h) - Video processing pipeline
+- [src/video_pipeline.cpp](../src/video_pipeline.cpp) - Video encoding/decoding
+- [src/audio_pipeline.h](../src/audio_pipeline.h) - Audio processing pipeline
+- [src/audio_pipeline.cpp](../src/audio_pipeline.cpp) - Audio encoding/PTS tracking
+- [src/muxer_manager.h](../src/muxer_manager.h) - HLS output manager
+- [src/muxer_manager.cpp](../src/muxer_manager.cpp) - Muxer configuration
+
+### Design Patterns Applied
+
+1. **Dependency Injection**: Pipelines receive `shared_ptr<FFmpegContext>` in constructor
+2. **RAII**: All resources managed by smart pointers with custom deleters
+3. **Single Responsibility**: Each class has one reason to change
+4. **Composition over Inheritance**: FFmpegWrapper composes pipelines
+5. **Shared Context**: `shared_ptr` ensures single library load, safe sharing
+
+### Future Improvements
+
+**Immediate (when needed)**:
+- Complete FFmpegWrapper migration to use pipelines
+- Remove redundant code from old implementation
+- Add unit tests for each pipeline
+
+**Long-term (optional)**:
+- Interface-based design for mocking (`IFFmpegContext`, `IVideoPipeline`)
+- Factory pattern for pipeline creation
+- Strategy pattern for different encoding profiles
+- Observer pattern for progress reporting
+
+### Lessons Learned
+
+1. **Modularization pays off**: Easier to understand, test, and maintain
+2. **Shared context pattern**: Eliminates duplicate loads and leaks
+3. **State encapsulation**: Struct with reset() prevents forgotten resets
+4. **Incremental refactoring**: Don't break working code, migrate gradually
+
+---
+

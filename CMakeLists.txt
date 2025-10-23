@@ -181,6 +181,10 @@ set(SOURCES
     src/obs_detector.cpp
     src/logger.cpp
     src/ffmpeg_loader.cpp
+    src/ffmpeg_context.cpp
+    src/video_pipeline.cpp
+    src/audio_pipeline.cpp
+    src/muxer_manager.cpp
     src/ffmpeg_wrapper.cpp
     src/cef_loader.cpp
     src/cef_function_wrappers.cpp
