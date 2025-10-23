@@ -19,6 +19,9 @@ bool HLSGenerator::initialize(const std::string& ffmpegLibPath) {
         return false;
     }
 
+    // Set config BEFORE openInput so backends receive correct configuration
+    ffmpegWrapper_->setConfig(config_);
+
     if (!ffmpegWrapper_->openInput(config_.hls.inputFile)) {
         Logger::error("Failed to open input file");
         return false;

@@ -44,4 +44,12 @@ struct AVBSFContextDeleter {
     }
 };
 
+struct SwrContextDeleter {
+    void operator()(SwrContext* ctx) const {
+        if (ctx) {
+            FFmpegLib::swr_free(&ctx);
+        }
+    }
+};
+
 #endif // FFMPEG_DELETERS_H

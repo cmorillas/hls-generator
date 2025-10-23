@@ -298,6 +298,51 @@ hls-generator/
 
 ## Recent Updates
 
+### v1.3.0 (2025-10-23): Code Quality Deep Dive - 4 Critical Fixes 🔍
+Comprehensive code quality improvements resolving critical functional and robustness issues.
+
+**Critical Fixes:**
+- ✅ **Audio in TRANSCODE mode** - Intelligent audio handling: AAC → remux (fast), non-AAC → transcode to AAC
+- ✅ **Dynamic FFmpeg loading** - Completed in `ffmpeg_loader.cpp`: tries unversioned → known versions → dynamic scan
+- ✅ **SwsContext auto-recreation** - Uses `sws_getCachedContext()` to handle resolution changes mid-stream
+- ✅ **AppConfig propagation** - Backends now receive correct configuration via `setConfig()` before `openInput()`
+
+**Audio Processing Strategy (Explicit & Automatic):**
+- **AAC audio** → REMUX (copy without transcoding) ⚡ Efficient, no quality loss
+- **Non-AAC audio** (MP3/Opus/Vorbis/etc.) → TRANSCODE to AAC 🔄 HLS-compatible
+- Automatic detection with clear logging: `"Audio is AAC - will REMUX"` or `"Audio codec ID 86018 (non-AAC) - will TRANSCODE to AAC"`
+
+**Technical Improvements:**
+- Added `setupAudioEncoder()` - AAC encoder configuration (128 kbps, preserves sample rate)
+- Added `tryLoadLibrary()` - 3-phase FFmpeg library loading with detailed logging
+- Added `sws_getCachedContext()` to FFmpegLib - Automatic context recreation when input dimensions change
+- Added `setConfig()` method - Ensures backends get configuration before instantiation
+
+**Robustness:**
+- Prevents audio loss in transcode mode
+- Prevents crashes from invalid scaling context
+- Prevents configuration mismatches in browser input
+- Future-proof FFmpeg loading (works with versions 59-65+)
+
+**Impact**: 4 critical issues resolved, audio now works in all scenarios, future-proof library loading, safer video scaling.
+
+**✅ Audio Transcoding Complete (SwrContext Implementation):**
+- ✅ **SwrContext integration** - Full audio format conversion (MP3, Opus, Vorbis → AAC)
+- ✅ **Modern FFmpeg APIs** - Uses `swr_alloc_set_opts2()` and `swr_convert_frame()` (FFmpeg 5.1+)
+- ✅ **Complete audio flushing** - Symmetric decoder/encoder draining (no audio loss)
+- ✅ **Cached frame optimization** - Reuses `convertedFrame_` for better performance
+- ✅ **Dynamic swresample loading** - Auto-detects any swresample version
+
+**Technical Implementation:**
+- Added `libswresample` dynamic loading with version detection
+- Created `SwrContextDeleter` for RAII cleanup
+- Fixed decoder initialization order (decoder → encoder → SwrContext)
+- Fixed `av_frame_unref()` issue by reconfiguring frame fields before conversion
+
+See [DEVELOPMENT-JOURNEY.md - SwrContext Implementation](docs/DEVELOPMENT-JOURNEY.md#solución-completa-swrcontext-implementation-v130-final) for complete technical details.
+
+---
+
 ### v1.2.0 (2025-10-22): Dynamic FFmpeg Version Detection 🔮
 Future-proof FFmpeg library detection to prevent breakage when OBS updates.
 

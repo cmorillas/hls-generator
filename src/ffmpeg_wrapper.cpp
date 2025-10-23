@@ -382,6 +382,60 @@ bool FFmpegWrapper::setupOutput(const AppConfig& config) {
         if (!setupBitstreamFilter()) {
             return false;
         }
+
+        // Configure audio stream in TRANSCODE mode
+        if (audioStreamIndex_ >= 0 && outAudioStream) {
+            AVStream* inAudioStream = inputFormatCtx_->streams[audioStreamIndex_];
+            inputAudioCodecId_ = inAudioStream->codecpar->codec_id;
+
+            // Decide strategy: Remux AAC or Transcode to AAC
+            if (inputAudioCodecId_ == AV_CODEC_ID_AAC) {
+                Logger::info("Audio is AAC - will REMUX (copy without transcoding)");
+                audioNeedsTranscoding_ = false;
+
+                // Copy codec parameters for remux
+                if (avcodec_parameters_copy(outAudioStream->codecpar, inAudioStream->codecpar) < 0) {
+                    Logger::error("Failed to copy audio codec parameters");
+                    return false;
+                }
+                outAudioStream->time_base = inAudioStream->time_base;
+            } else {
+                Logger::warn("Audio codec ID " + std::to_string(inputAudioCodecId_) +
+                            " (non-AAC) - will TRANSCODE to AAC");
+                audioNeedsTranscoding_ = true;
+
+                // FIRST: Open audio decoder (needed by setupAudioEncoder to configure SwrContext)
+                const AVCodec* audioDecoder = avcodec_find_decoder(inputAudioCodecId_);
+                if (!audioDecoder) {
+                    Logger::error("Audio decoder not found for codec " + std::to_string(inputAudioCodecId_));
+                    return false;
+                }
+
+                inputAudioCodecCtx_.reset(avcodec_alloc_context3(audioDecoder));
+                if (!inputAudioCodecCtx_) {
+                    Logger::error("Failed to allocate audio decoder context");
+                    return false;
+                }
+
+                if (avcodec_parameters_to_context(inputAudioCodecCtx_.get(), inAudioStream->codecpar) < 0) {
+                    Logger::error("Failed to copy audio codec parameters to decoder");
+                    return false;
+                }
+
+                if (avcodec_open2(inputAudioCodecCtx_.get(), audioDecoder, nullptr) < 0) {
+                    Logger::error("Failed to open audio decoder");
+                    return false;
+                }
+
+                Logger::info("Audio decoder opened for transcoding");
+
+                // SECOND: Setup audio encoder (uses inputAudioCodecCtx_ for SwrContext config)
+                if (!setupAudioEncoder(outAudioStream)) {
+                    Logger::error("Failed to setup audio encoder");
+                    return false;
+                }
+            }
+        }
     }
 
     av_opt_set(outputFormatCtx_->priv_data, "hls_time", std::to_string(config_.hls.segmentDuration).c_str(), 0);
@@ -436,6 +490,15 @@ bool FFmpegWrapper::resetOutput() {
         swsCtx_.reset();
         Logger::info(">>> Reset video scaler context");
     }
+
+    // Reset SwrContext and audio PTS tracker for clean audio restart
+    if (swrCtx_) {
+        swrCtx_.reset();
+        Logger::info(">>> Reset audio resampler context");
+    }
+    lastAudioPts_ = 0;  // Reset PTS tracker to avoid inconsistent timestamps
+    audioPtsInitialized_ = false;  // Reset initialization flag for next stream
+    audioPtsWarningShown_ = false;  // Reset warning flag to show message for new stream
 
     outputVideoStreamIndex_ = -1;
     outputAudioStreamIndex_ = -1;
@@ -531,6 +594,93 @@ bool FFmpegWrapper::setupEncoder() {
         Logger::error("Failed to open encoder");
         return false;
     }
+
+    return true;
+}
+
+bool FFmpegWrapper::setupAudioEncoder(AVStream* outAudioStream) {
+    // Find AAC encoder
+    const AVCodec* audioCodec = avcodec_find_encoder(AV_CODEC_ID_AAC);
+    if (!audioCodec) {
+        Logger::error("AAC encoder not found");
+        return false;
+    }
+
+    Logger::info("Setting up AAC audio encoder");
+
+    // Allocate audio encoder context
+    outputAudioCodecCtx_.reset(avcodec_alloc_context3(audioCodec));
+    if (!outputAudioCodecCtx_) {
+        Logger::error("Failed to allocate audio encoder context");
+        return false;
+    }
+
+    // Configure encoder from input audio stream
+    AVStream* inAudioStream = inputFormatCtx_->streams[audioStreamIndex_];
+    outputAudioCodecCtx_->sample_rate = inAudioStream->codecpar->sample_rate;
+    outputAudioCodecCtx_->ch_layout = inAudioStream->codecpar->ch_layout;
+    outputAudioCodecCtx_->sample_fmt = audioCodec->sample_fmts ? audioCodec->sample_fmts[0] : AV_SAMPLE_FMT_FLTP;
+    outputAudioCodecCtx_->bit_rate = 128000; // 128 kbps - good quality for streaming
+    outputAudioCodecCtx_->time_base = AVRational{1, outputAudioCodecCtx_->sample_rate};
+
+    // Open encoder
+    if (avcodec_open2(outputAudioCodecCtx_.get(), audioCodec, nullptr) < 0) {
+        Logger::error("Failed to open audio encoder");
+        return false;
+    }
+
+    // Copy parameters to output stream
+    if (avcodec_parameters_from_context(outAudioStream->codecpar, outputAudioCodecCtx_.get()) < 0) {
+        Logger::error("Failed to copy audio encoder parameters to output stream");
+        return false;
+    }
+
+    outAudioStream->time_base = outputAudioCodecCtx_->time_base;
+
+    Logger::info("Audio encoder configured: AAC, " +
+                std::to_string(outputAudioCodecCtx_->sample_rate) + " Hz, " +
+                std::to_string(outputAudioCodecCtx_->bit_rate / 1000) + " kbps");
+
+    // Initialize SwrContext for audio format conversion (decoder -> encoder)
+    SwrContext* swrCtxRaw = FFmpegLib::swr_alloc();
+    if (!swrCtxRaw) {
+        Logger::error("Failed to allocate SwrContext");
+        return false;
+    }
+
+    int ret = FFmpegLib::swr_alloc_set_opts2(
+        &swrCtxRaw,
+        &outputAudioCodecCtx_->ch_layout,           // Output channel layout
+        outputAudioCodecCtx_->sample_fmt,           // Output sample format (FLTP for AAC)
+        outputAudioCodecCtx_->sample_rate,          // Output sample rate
+        &inputAudioCodecCtx_->ch_layout,            // Input channel layout
+        inputAudioCodecCtx_->sample_fmt,            // Input sample format
+        inputAudioCodecCtx_->sample_rate,           // Input sample rate
+        0, nullptr);
+
+    if (ret < 0) {
+        Logger::error("Failed to configure SwrContext");
+        FFmpegLib::swr_free(&swrCtxRaw);
+        return false;
+    }
+
+    if (FFmpegLib::swr_init(swrCtxRaw) < 0) {
+        Logger::error("Failed to initialize SwrContext");
+        FFmpegLib::swr_free(&swrCtxRaw);
+        return false;
+    }
+
+    // Transfer ownership to unique_ptr
+    swrCtx_.reset(swrCtxRaw);
+
+    // Allocate cached frame for audio conversion
+    convertedFrame_.reset(av_frame_alloc());
+    if (!convertedFrame_) {
+        Logger::error("Failed to allocate converted audio frame");
+        return false;
+    }
+
+    Logger::info("Audio resampler initialized successfully");
 
     return true;
 }
@@ -784,23 +934,27 @@ bool FFmpegWrapper::convertAndEncodeFrame(AVFrame* inputFrame, int64_t pts) {
     AVFrame* scaledFrame = nullptr;
 
     if (needsConversion) {
-        // Lazy initialization of SwsContext
-        if (!swsCtx_) {
-            Logger::info("Initializing video scaler: " +
+        // Get or recreate SwsContext if input dimensions/format changed
+        // sws_getCachedContext automatically recreates context when parameters change
+        SwsContext* newCtx = FFmpegLib::sws_getCachedContext(
+            swsCtx_.get(),  // Can be nullptr for first call
+            inputFrame->width, inputFrame->height, (AVPixelFormat)inputFrame->format,
+            outputCodecCtx_->width, outputCodecCtx_->height, outputCodecCtx_->pix_fmt,
+            SWS_BILINEAR, nullptr, nullptr, nullptr);
+
+        if (!newCtx) {
+            Logger::error("Failed to get/create video scaler context");
+            return false;
+        }
+
+        // Check if context was recreated (different pointer)
+        if (newCtx != swsCtx_.get()) {
+            Logger::info("Video scaler " + std::string(swsCtx_ ? "recreated" : "initialized") + ": " +
                        std::to_string(inputFrame->width) + "x" + std::to_string(inputFrame->height) + " " +
                        "fmt=" + std::to_string(inputFrame->format) + " -> " +
                        std::to_string(outputCodecCtx_->width) + "x" + std::to_string(outputCodecCtx_->height) + " " +
                        "fmt=" + std::to_string(outputCodecCtx_->pix_fmt));
-
-            swsCtx_.reset(sws_getContext(
-                inputFrame->width, inputFrame->height, (AVPixelFormat)inputFrame->format,
-                outputCodecCtx_->width, outputCodecCtx_->height, outputCodecCtx_->pix_fmt,
-                SWS_BILINEAR, nullptr, nullptr, nullptr));
-
-            if (!swsCtx_) {
-                Logger::error("Failed to initialize video scaler");
-                return false;
-            }
+            swsCtx_.reset(newCtx);
         }
 
         // Allocate scaled frame
@@ -868,6 +1022,7 @@ bool FFmpegWrapper::processVideoTranscode() {
             break;
         }
 
+        // Process video packets - transcode
         if (packet->stream_index == videoStreamIndex_) {
             if (avcodec_send_packet(inputCodecCtx_.get(), packet) < 0) {
                 Logger::error("Error sending packet to decoder");
@@ -927,6 +1082,129 @@ bool FFmpegWrapper::processVideoTranscode() {
                 av_frame_unref(frame);
             }
         }
+        // Process audio packets
+        else if (packet->stream_index == audioStreamIndex_ && outputAudioStreamIndex_ >= 0) {
+            if (!audioNeedsTranscoding_) {
+                // Strategy: REMUX - Copy AAC audio without transcoding (efficient)
+                packet->stream_index = outputAudioStreamIndex_;
+
+                // Rescale timestamps from input to output timebase
+                av_packet_rescale_ts(packet,
+                    inputFormatCtx_->streams[audioStreamIndex_]->time_base,
+                    outputFormatCtx_->streams[outputAudioStreamIndex_]->time_base);
+
+                // Write audio packet to output
+                if (av_interleaved_write_frame(outputFormatCtx_.get(), packet) < 0) {
+                    Logger::error("Error writing audio packet to HLS output");
+                }
+            } else {
+                // Strategy: TRANSCODE - Convert non-AAC audio to AAC
+                // Decode audio packet
+                if (avcodec_send_packet(inputAudioCodecCtx_.get(), packet) < 0) {
+                    Logger::error("Error sending audio packet to decoder");
+                    av_packet_unref(packet);
+                    continue;
+                }
+
+                AVFrame* audioFrame = av_frame_alloc();
+                if (!audioFrame) {
+                    Logger::error("Failed to allocate audio frame");
+                    av_packet_unref(packet);
+                    continue;
+                }
+
+                while (avcodec_receive_frame(inputAudioCodecCtx_.get(), audioFrame) == 0) {
+                    // Convert audio format using SwrContext (decoder format -> encoder format)
+                    av_frame_unref(convertedFrame_.get());
+
+                    // Re-configure convertedFrame with output format (required by swr_convert_frame)
+                    convertedFrame_->format = outputAudioCodecCtx_->sample_fmt;
+                    convertedFrame_->sample_rate = outputAudioCodecCtx_->sample_rate;
+                    convertedFrame_->ch_layout = outputAudioCodecCtx_->ch_layout;
+                    convertedFrame_->nb_samples = 0;  // Let swr_convert_frame allocate buffer
+
+                    int ret = FFmpegLib::swr_convert_frame(swrCtx_.get(), convertedFrame_.get(), audioFrame);
+                    if (ret < 0) {
+                        Logger::error("Error converting audio frame with SwrContext");
+                        av_frame_unref(audioFrame);
+                        continue;
+                    }
+
+                    // Rescale PTS to encoder timebase (preserves A/V sync with offsets)
+                    // Use best_effort_timestamp field directly (av_frame_get_best_effort_timestamp is inline)
+                    int64_t srcPts = audioFrame->best_effort_timestamp;
+                    if (srcPts == AV_NOPTS_VALUE) {
+                        // Fallback: generate synthetic PTS for streams without timestamps
+                        if (!audioPtsInitialized_) {
+                            // First frame without PTS: start at 0 to avoid initial offset
+                            srcPts = 0;
+                            audioPtsInitialized_ = true;
+                            if (!audioPtsWarningShown_) {
+                                Logger::warn("Audio stream has no PTS - generating synthetic timestamps");
+                                audioPtsWarningShown_ = true;
+                            }
+                        } else {
+                            // Subsequent frames: increment from last PTS
+                            // Convert nb_samples to input stream timebase (handles containers with non-standard timebases)
+                            auto* inStream = inputFormatCtx_->streams[audioStreamIndex_];
+                            AVRational samplesTb = {1, inputAudioCodecCtx_->sample_rate};
+                            int64_t increment = FFmpegLib::av_rescale_q(audioFrame->nb_samples, samplesTb, inStream->time_base);
+                            if (increment <= 0) {
+                                increment = 1;  // Defensive fallback for overflow/underflow
+                            }
+                            srcPts = lastAudioPts_ + increment;
+                            Logger::debug("Audio frame without PTS - using synthetic timestamp");
+                        }
+                    } else {
+                        // Valid PTS received - mark as initialized
+                        audioPtsInitialized_ = true;
+                    }
+                    lastAudioPts_ = srcPts;
+
+                    // Rescale from input timebase to encoder timebase
+                    int64_t dstPts = FFmpegLib::av_rescale_q(
+                        srcPts,
+                        inputFormatCtx_->streams[audioStreamIndex_]->time_base,
+                        outputAudioCodecCtx_->time_base
+                    );
+                    convertedFrame_->pts = dstPts;
+
+                    // Encode converted audio frame to AAC
+                    if (avcodec_send_frame(outputAudioCodecCtx_.get(), convertedFrame_.get()) < 0) {
+                        Logger::error("Error sending converted audio frame to encoder");
+                        av_frame_unref(audioFrame);
+                        continue;
+                    }
+
+                    AVPacket* outAudioPacket = av_packet_alloc();
+                    if (!outAudioPacket) {
+                        Logger::error("Failed to allocate output audio packet");
+                        av_frame_unref(audioFrame);
+                        continue;
+                    }
+
+                    while (avcodec_receive_packet(outputAudioCodecCtx_.get(), outAudioPacket) == 0) {
+                        outAudioPacket->stream_index = outputAudioStreamIndex_;
+
+                        // Rescale timestamps
+                        av_packet_rescale_ts(outAudioPacket,
+                            outputAudioCodecCtx_->time_base,
+                            outputFormatCtx_->streams[outputAudioStreamIndex_]->time_base);
+
+                        // Write transcoded audio packet
+                        if (av_interleaved_write_frame(outputFormatCtx_.get(), outAudioPacket) < 0) {
+                            Logger::error("Error writing transcoded audio packet");
+                        }
+
+                        av_packet_unref(outAudioPacket);
+                    }
+                    av_packet_free(&outAudioPacket);
+
+                    av_frame_unref(audioFrame);
+                }
+                av_frame_free(&audioFrame);
+            }
+        }
 
         av_packet_unref(packet);
     }
@@ -967,6 +1245,107 @@ bool FFmpegWrapper::processVideoTranscode() {
         av_packet_unref(outPacket);
     }
     av_packet_free(&outPacket);
+
+    // Flush audio decoder and encoder if transcoding audio
+    if (audioNeedsTranscoding_ && inputAudioCodecCtx_ && outputAudioCodecCtx_ && outputAudioStreamIndex_ >= 0) {
+        // Drain audio decoder (flush buffered frames)
+        avcodec_send_packet(inputAudioCodecCtx_.get(), nullptr);
+
+        AVFrame* audioFrame = av_frame_alloc();
+        while (avcodec_receive_frame(inputAudioCodecCtx_.get(), audioFrame) == 0) {
+            // Convert audio format using SwrContext
+            av_frame_unref(convertedFrame_.get());
+
+            // Re-configure convertedFrame with output format (required by swr_convert_frame)
+            convertedFrame_->format = outputAudioCodecCtx_->sample_fmt;
+            convertedFrame_->sample_rate = outputAudioCodecCtx_->sample_rate;
+            convertedFrame_->ch_layout = outputAudioCodecCtx_->ch_layout;
+            convertedFrame_->nb_samples = 0;  // Let swr_convert_frame allocate buffer
+
+            int ret = FFmpegLib::swr_convert_frame(swrCtx_.get(), convertedFrame_.get(), audioFrame);
+            if (ret < 0) {
+                Logger::error("Error converting audio frame during flush");
+                av_frame_unref(audioFrame);
+                continue;
+            }
+
+            // Rescale PTS to encoder timebase (same logic as normal conversion)
+            int64_t srcPts = audioFrame->best_effort_timestamp;
+            if (srcPts == AV_NOPTS_VALUE) {
+                if (!audioPtsInitialized_) {
+                    // First frame without PTS: start at 0 to avoid initial offset
+                    srcPts = 0;
+                    audioPtsInitialized_ = true;
+                    if (!audioPtsWarningShown_) {
+                        Logger::warn("Audio stream has no PTS during flush - generating synthetic timestamps");
+                        audioPtsWarningShown_ = true;
+                    }
+                } else {
+                    // Subsequent frames: increment from last PTS
+                    // Convert nb_samples to input stream timebase (handles containers with non-standard timebases)
+                    auto* inStream = inputFormatCtx_->streams[audioStreamIndex_];
+                    AVRational samplesTb = {1, inputAudioCodecCtx_->sample_rate};
+                    int64_t increment = FFmpegLib::av_rescale_q(audioFrame->nb_samples, samplesTb, inStream->time_base);
+                    if (increment <= 0) {
+                        increment = 1;  // Defensive fallback for overflow/underflow
+                    }
+                    srcPts = lastAudioPts_ + increment;
+                    Logger::debug("Audio frame without PTS during flush - using synthetic timestamp");
+                }
+            } else {
+                // Valid PTS received - mark as initialized
+                audioPtsInitialized_ = true;
+            }
+            lastAudioPts_ = srcPts;
+
+            int64_t dstPts = FFmpegLib::av_rescale_q(
+                srcPts,
+                inputFormatCtx_->streams[audioStreamIndex_]->time_base,
+                outputAudioCodecCtx_->time_base
+            );
+            convertedFrame_->pts = dstPts;
+
+            // Encode converted audio frame to AAC
+            if (avcodec_send_frame(outputAudioCodecCtx_.get(), convertedFrame_.get()) < 0) {
+                Logger::error("Error sending converted audio frame to encoder during flush");
+                av_frame_unref(audioFrame);
+                continue;
+            }
+
+            // Read all encoded packets
+            AVPacket* outAudioPacket = av_packet_alloc();
+            while (avcodec_receive_packet(outputAudioCodecCtx_.get(), outAudioPacket) == 0) {
+                outAudioPacket->stream_index = outputAudioStreamIndex_;
+                av_packet_rescale_ts(outAudioPacket,
+                    outputAudioCodecCtx_->time_base,
+                    outputFormatCtx_->streams[outputAudioStreamIndex_]->time_base);
+
+                av_interleaved_write_frame(outputFormatCtx_.get(), outAudioPacket);
+                av_packet_unref(outAudioPacket);
+            }
+            av_packet_free(&outAudioPacket);
+
+            av_frame_unref(audioFrame);
+        }
+        av_frame_free(&audioFrame);
+
+        // Drain audio encoder (flush buffered packets)
+        avcodec_send_frame(outputAudioCodecCtx_.get(), nullptr);
+
+        AVPacket* outAudioPacket = av_packet_alloc();
+        while (avcodec_receive_packet(outputAudioCodecCtx_.get(), outAudioPacket) == 0) {
+            outAudioPacket->stream_index = outputAudioStreamIndex_;
+            av_packet_rescale_ts(outAudioPacket,
+                outputAudioCodecCtx_->time_base,
+                outputFormatCtx_->streams[outputAudioStreamIndex_]->time_base);
+
+            av_interleaved_write_frame(outputFormatCtx_.get(), outAudioPacket);
+            av_packet_unref(outAudioPacket);
+        }
+        av_packet_free(&outAudioPacket);
+
+        Logger::info("Audio decoder and encoder flushed successfully");
+    }
 
     av_write_trailer(outputFormatCtx_.get());
 

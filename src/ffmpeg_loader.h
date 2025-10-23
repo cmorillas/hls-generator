@@ -20,6 +20,7 @@ struct AVIOContext;
 struct AVBSFContext;
 struct AVBitStreamFilter;
 struct SwsContext;
+struct SwrContext;
 }
 
 namespace FFmpegLib {
@@ -72,14 +73,23 @@ namespace FFmpegLib {
     extern void (*av_packet_unref)(AVPacket*);
     extern AVPacket* (*av_packet_clone)(const AVPacket*);
     extern void (*av_packet_rescale_ts)(AVPacket*, AVRational, AVRational);
+    extern int64_t (*av_rescale_q)(int64_t, AVRational, AVRational);
     extern int (*av_opt_set)(void*, const char*, const char*, int);
     extern void* (*av_malloc)(size_t);
     extern void (*av_free)(void*);
 
     // swscale functions
     extern SwsContext* (*sws_getContext)(int, int, int, int, int, int, int, void*, void*, const double*);
+    extern SwsContext* (*sws_getCachedContext)(SwsContext*, int, int, int, int, int, int, int, void*, void*, const double*);
     extern void (*sws_freeContext)(SwsContext*);
     extern int (*sws_scale)(SwsContext*, const uint8_t* const*, const int*, int, int, uint8_t* const*, const int*);
+
+    // swresample functions
+    extern SwrContext* (*swr_alloc)();
+    extern int (*swr_alloc_set_opts2)(SwrContext**, const void*, int, int, const void*, int, int, int, void*);
+    extern int (*swr_init)(SwrContext*);
+    extern int (*swr_convert_frame)(SwrContext*, AVFrame*, const AVFrame*);
+    extern void (*swr_free)(SwrContext**);
 }
 
 bool loadFFmpegLibraries(const std::string& libPath);
