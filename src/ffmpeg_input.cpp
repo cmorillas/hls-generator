@@ -1,25 +1,26 @@
 
 #include "ffmpeg_input.h"
-#include "ffmpeg_loader.h"
+#include "ffmpeg_context.h"
 #include "logger.h"
 
 extern "C" {
 #include <libavformat/avformat.h>
 }
 
-FFmpegInput::FFmpegInput(const std::string& protocol) : protocol_(protocol) {}
+FFmpegInput::FFmpegInput(const std::string& protocol, std::shared_ptr<FFmpegContext> ffmpegCtx)
+    : ffmpeg_(ffmpegCtx), protocol_(protocol) {}
 
 FFmpegInput::~FFmpegInput() {
     close();
 }
 
 bool FFmpegInput::open(const std::string& uri) {
-    if (FFmpegLib::avformat_open_input(&formatContext_, uri.c_str(), nullptr, nullptr) != 0) {
+    if (ffmpeg_->avformat_open_input(&formatContext_, uri.c_str(), nullptr, nullptr) != 0) {
         Logger::error("Failed to open input: " + uri);
         return false;
     }
 
-    if (FFmpegLib::avformat_find_stream_info(formatContext_, nullptr) < 0) {
+    if (ffmpeg_->avformat_find_stream_info(formatContext_, nullptr) < 0) {
         Logger::error("Failed to find stream info");
         return false;
     }
@@ -41,12 +42,12 @@ bool FFmpegInput::open(const std::string& uri) {
 }
 
 bool FFmpegInput::readPacket(AVPacket* packet) {
-    return FFmpegLib::av_read_frame(formatContext_, packet) >= 0;
+    return ffmpeg_->av_read_frame(formatContext_, packet) >= 0;
 }
 
 void FFmpegInput::close() {
     if (formatContext_) {
-        FFmpegLib::avformat_close_input(&formatContext_);
+        ffmpeg_->avformat_close_input(&formatContext_);
         formatContext_ = nullptr;
     }
 }

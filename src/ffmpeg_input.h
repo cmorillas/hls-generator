@@ -3,10 +3,14 @@
 #define FFMPEG_INPUT_H
 
 #include "stream_input.h"
+#include <memory>
+
+// Forward declarations
+class FFmpegContext;
 
 class FFmpegInput : public StreamInput {
 public:
-    FFmpegInput(const std::string& protocol);
+    FFmpegInput(const std::string& protocol, std::shared_ptr<FFmpegContext> ffmpegCtx);
     ~FFmpegInput() override;
 
     bool open(const std::string& uri) override;
@@ -20,6 +24,7 @@ public:
     std::string getTypeName() const override;
 
 private:
+    std::shared_ptr<FFmpegContext> ffmpeg_;
     std::string protocol_;
     AVFormatContext* formatContext_ = nullptr;
     int videoStreamIndex_ = -1;

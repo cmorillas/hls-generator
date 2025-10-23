@@ -50,7 +50,8 @@ bool VideoPipeline::setupDecoder(AVStream* inStream) {
 
     Logger::info("Input codec: " + std::string(decoder->name));
 
-    inputCodecCtx_.reset(ffmpeg_->avcodec_alloc_context3(decoder));
+    inputCodecCtx_ = std::unique_ptr<AVCodecContext, AVCodecContextDeleter>(
+        ffmpeg_->avcodec_alloc_context3(decoder), AVCodecContextDeleter(ffmpeg_));
     if (!inputCodecCtx_) {
         Logger::error("Failed to allocate decoder context");
         return false;
@@ -85,7 +86,8 @@ bool VideoPipeline::setupEncoder(AVStream* outStream, const AppConfig& config) {
 
     Logger::info("Using encoder: " + std::string(encoder->name));
 
-    outputCodecCtx_.reset(ffmpeg_->avcodec_alloc_context3(encoder));
+    outputCodecCtx_ = std::unique_ptr<AVCodecContext, AVCodecContextDeleter>(
+        ffmpeg_->avcodec_alloc_context3(encoder), AVCodecContextDeleter(ffmpeg_));
     if (!outputCodecCtx_) {
         Logger::error("Failed to allocate encoder context");
         return false;
@@ -134,7 +136,7 @@ bool VideoPipeline::setupBitstreamFilter(AVStream* inStream, AVStream* outStream
         Logger::error("Failed to allocate bitstream filter context");
         return false;
     }
-    bsfCtx_.reset(temp_bsf_ctx);
+    bsfCtx_ = std::unique_ptr<AVBSFContext, AVBSFContextDeleter>(temp_bsf_ctx, AVBSFContextDeleter(ffmpeg_));
 
     AVCodecParameters* codecParams = nullptr;
     AVRational timeBase;
@@ -179,7 +181,7 @@ bool VideoPipeline::convertAndEncodeFrame(AVFrame* inputFrame, int64_t pts) {
                           (inputFrame->format != outputCodecCtx_->pix_fmt);
 
     AVFrame* frameToEncode = inputFrame;
-    AVFrame* scaledFrame = nullptr;
+    std::unique_ptr<AVFrame, AVFrameDeleter> scaledFrame;
 
     if (needsConversion) {
         // Get or recreate SwsContext if input dimensions/format changed
@@ -200,11 +202,12 @@ bool VideoPipeline::convertAndEncodeFrame(AVFrame* inputFrame, int64_t pts) {
                        "fmt=" + std::to_string(inputFrame->format) + " -> " +
                        std::to_string(outputCodecCtx_->width) + "x" + std::to_string(outputCodecCtx_->height) + " " +
                        "fmt=" + std::to_string(outputCodecCtx_->pix_fmt));
-            swsCtx_.reset(newCtx);
+            swsCtx_ = std::unique_ptr<SwsContext, SwsContextDeleter>(newCtx, SwsContextDeleter(ffmpeg_));
         }
 
         // Allocate scaled frame
-        scaledFrame = ffmpeg_->av_frame_alloc();
+        scaledFrame = std::unique_ptr<AVFrame, AVFrameDeleter>(
+            ffmpeg_->av_frame_alloc(), AVFrameDeleter(ffmpeg_));
         if (!scaledFrame) {
             Logger::warn("Failed to allocate scaled frame");
             return false;
@@ -214,9 +217,8 @@ bool VideoPipeline::convertAndEncodeFrame(AVFrame* inputFrame, int64_t pts) {
         scaledFrame->width = outputCodecCtx_->width;
         scaledFrame->height = outputCodecCtx_->height;
 
-        if (ffmpeg_->av_frame_get_buffer(scaledFrame, 0) < 0) {
+        if (ffmpeg_->av_frame_get_buffer(scaledFrame.get(), 0) < 0) {
             Logger::warn("Failed to allocate scaled frame buffer");
-            ffmpeg_->av_frame_free(&scaledFrame);
             return false;
         }
 
@@ -227,22 +229,64 @@ bool VideoPipeline::convertAndEncodeFrame(AVFrame* inputFrame, int64_t pts) {
                  scaledFrame->data, scaledFrame->linesize);
 
         scaledFrame->pts = inputFrame->pts;
-        frameToEncode = scaledFrame;
+        frameToEncode = scaledFrame.get();
     }
 
     // Send frame to encoder
-    bool success = true;
     if (ffmpeg_->avcodec_send_frame(outputCodecCtx_.get(), frameToEncode) < 0) {
         Logger::warn("Error sending frame to encoder");
-        success = false;
+        return false;
     }
 
-    // Free scaled frame if it was allocated
-    if (scaledFrame) {
-        ffmpeg_->av_frame_free(&scaledFrame);
+    // scaledFrame automatically freed by unique_ptr when going out of scope
+    return true;
+}
+
+bool VideoPipeline::decodePacket(AVPacket* packet, AVFrame* frame, bool& frameAvailable) {
+    frameAvailable = false;
+
+    if (!inputCodecCtx_) {
+        Logger::error("Decoder not initialized");
+        return false;
     }
 
-    return success;
+    if (ffmpeg_->avcodec_send_packet(inputCodecCtx_.get(), packet) < 0) {
+        Logger::error("Error sending packet to decoder");
+        return false;
+    }
+
+    int ret = ffmpeg_->avcodec_receive_frame(inputCodecCtx_.get(), frame);
+    if (ret == 0) {
+        frameAvailable = true;
+        return true;
+    } else if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+        // No frame available yet, but not an error
+        return true;
+    } else {
+        Logger::error("Error receiving frame from decoder");
+        return false;
+    }
+}
+
+bool VideoPipeline::receiveEncodedPacket(AVPacket* packet, bool& packetAvailable) {
+    packetAvailable = false;
+
+    if (!outputCodecCtx_) {
+        Logger::error("Encoder not initialized");
+        return false;
+    }
+
+    int ret = ffmpeg_->avcodec_receive_packet(outputCodecCtx_.get(), packet);
+    if (ret == 0) {
+        packetAvailable = true;
+        return true;
+    } else if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+        // No packet available yet, but not an error
+        return true;
+    } else {
+        Logger::error("Error receiving packet from encoder");
+        return false;
+    }
 }
 
 bool VideoPipeline::processBitstreamFilter(AVPacket* packet,

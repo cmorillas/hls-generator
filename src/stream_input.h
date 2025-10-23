@@ -5,6 +5,9 @@
 #include <memory>
 #include "config.h"
 
+// Forward declarations
+class FFmpegContext;
+
 // Forward declarations for FFmpeg types
 extern "C" {
 struct AVFormatContext;
@@ -30,7 +33,7 @@ public:
 
 class StreamInputFactory {
 public:
-    static std::unique_ptr<StreamInput> create(const std::string& uri, const AppConfig& config);
+    static std::unique_ptr<StreamInput> create(const std::string& uri, const AppConfig& config, std::shared_ptr<FFmpegContext> ffmpegCtx);
     static std::string detectInputType(const std::string& uri);
 };
 

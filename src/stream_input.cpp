@@ -34,15 +34,15 @@ std::string StreamInputFactory::detectInputType(const std::string& uri) {
     return "file";
 }
 
-std::unique_ptr<StreamInput> StreamInputFactory::create(const std::string& uri, const AppConfig& config) {
+std::unique_ptr<StreamInput> StreamInputFactory::create(const std::string& uri, const AppConfig& config, std::shared_ptr<FFmpegContext> ffmpegCtx) {
     std::string inputType = detectInputType(uri);
 
     Logger::info("Detected input type: " + inputType);
 
     if (inputType == "browser") {
-        return std::make_unique<BrowserInput>(config);
+        return std::make_unique<BrowserInput>(config, ffmpegCtx);
     } else if (inputType == "file" || inputType == "srt" || inputType == "rtmp" || inputType == "ndi" || inputType == "rtsp" || inputType == "udp") {
-        return std::make_unique<FFmpegInput>(inputType);
+        return std::make_unique<FFmpegInput>(inputType, ffmpegCtx);
     } else {
         Logger::error("Unsupported input type: " + inputType);
         return nullptr;

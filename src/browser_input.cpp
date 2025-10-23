@@ -1,15 +1,16 @@
 #include "browser_input.h"
 #include "browser_backend.h"
 #include "cef_backend.h"
-#include "ffmpeg_loader.h"
+#include "ffmpeg_context.h"
 #include "logger.h"
 
 #include <chrono>
 #include <thread>
 #include <cstring>
 
-BrowserInput::BrowserInput(const AppConfig& config)
-    : config_(config)
+BrowserInput::BrowserInput(const AppConfig& config, std::shared_ptr<FFmpegContext> ffmpegCtx)
+    : ffmpeg_(ffmpegCtx)
+    , config_(config)
     , video_stream_index_(0)
     , audio_stream_index_(-1)
     , frame_ready_(false)
@@ -248,20 +249,20 @@ std::string BrowserInput::getTypeName() const {
 bool BrowserInput::setupEncoder(bool is_reset) {
     if (!is_reset) {
         AVFormatContext* temp_format_ctx = nullptr;
-        if (FFmpegLib::avformat_alloc_output_context2(&temp_format_ctx, nullptr, "mpegts", nullptr) < 0) {
+        if (ffmpeg_->avformat_alloc_output_context2(&temp_format_ctx, nullptr, "mpegts", nullptr) < 0) {
             Logger::error("Failed to allocate output format context");
             return false;
         }
-        format_ctx_.reset(temp_format_ctx);
+        format_ctx_ = std::unique_ptr<AVFormatContext, AVFormatContextDeleter>(temp_format_ctx, AVFormatContextDeleter(ffmpeg_));
     }
 
-    const AVCodec* codec = FFmpegLib::avcodec_find_encoder(AV_CODEC_ID_H264);
+    const AVCodec* codec = ffmpeg_->avcodec_find_encoder(AV_CODEC_ID_H264);
     if (!codec) {
         Logger::error("H.264 codec not found");
         return false;
     }
 
-    codec_ctx_.reset(FFmpegLib::avcodec_alloc_context3(codec));
+    codec_ctx_ = std::unique_ptr<AVCodecContext, AVCodecContextDeleter>(ffmpeg_->avcodec_alloc_context3(codec), AVCodecContextDeleter(ffmpeg_));
     if (!codec_ctx_) {
         Logger::error("Failed to allocate codec context");
         return false;
@@ -276,34 +277,34 @@ bool BrowserInput::setupEncoder(bool is_reset) {
     codec_ctx_->gop_size = config_.video.gop_size;
     codec_ctx_->max_b_frames = 0;
 
-    FFmpegLib::av_opt_set(codec_ctx_->priv_data, "preset", "ultrafast", 0);
-    FFmpegLib::av_opt_set(codec_ctx_->priv_data, "tune", "zerolatency", 0);
+    ffmpeg_->av_opt_set(codec_ctx_->priv_data, "preset", "ultrafast", 0);
+    ffmpeg_->av_opt_set(codec_ctx_->priv_data, "tune", "zerolatency", 0);
 
-    if (FFmpegLib::avcodec_open2(codec_ctx_.get(), codec, nullptr) < 0) {
+    if (ffmpeg_->avcodec_open2(codec_ctx_.get(), codec, nullptr) < 0) {
         Logger::error("Failed to open codec");
         return false;
     }
 
     if (!is_reset) {
-        AVStream* stream = FFmpegLib::avformat_new_stream(format_ctx_.get(), nullptr);
+        AVStream* stream = ffmpeg_->avformat_new_stream(format_ctx_.get(), nullptr);
         if (!stream) {
             Logger::error("Failed to create video stream");
             return false;
         }
 
         stream->time_base = codec_ctx_->time_base;
-        FFmpegLib::avcodec_parameters_from_context(stream->codecpar, codec_ctx_.get());
+        ffmpeg_->avcodec_parameters_from_context(stream->codecpar, codec_ctx_.get());
         video_stream_index_ = stream->index;
     } else {
         // During reset, update existing stream's codec parameters
         if (video_stream_index_ >= 0 && video_stream_index_ < (int)format_ctx_->nb_streams) {
             AVStream* stream = format_ctx_->streams[video_stream_index_];
             stream->time_base = codec_ctx_->time_base;
-            FFmpegLib::avcodec_parameters_from_context(stream->codecpar, codec_ctx_.get());
+            ffmpeg_->avcodec_parameters_from_context(stream->codecpar, codec_ctx_.get());
         }
     }
 
-    yuv_frame_.reset(FFmpegLib::av_frame_alloc());
+    yuv_frame_ = std::unique_ptr<AVFrame, AVFrameDeleter>(ffmpeg_->av_frame_alloc(), AVFrameDeleter(ffmpeg_));
     if (!yuv_frame_) {
         Logger::error("Failed to allocate YUV frame");
         return false;
@@ -313,15 +314,15 @@ bool BrowserInput::setupEncoder(bool is_reset) {
     yuv_frame_->width = config_.video.width;
     yuv_frame_->height = config_.video.height;
 
-    if (FFmpegLib::av_frame_get_buffer(yuv_frame_.get(), 32) < 0) {
+    if (ffmpeg_->av_frame_get_buffer(yuv_frame_.get(), 32) < 0) {
         Logger::error("Failed to allocate YUV frame buffer");
         return false;
     }
 
-    sws_ctx_.reset(FFmpegLib::sws_getContext(
+    sws_ctx_ = std::unique_ptr<SwsContext, SwsContextDeleter>(ffmpeg_->sws_getContext(
         config_.video.width, config_.video.height, AV_PIX_FMT_BGRA,
         config_.video.width, config_.video.height, AV_PIX_FMT_YUV420P,
-        SWS_BILINEAR, nullptr, nullptr, nullptr));
+        SWS_BILINEAR, nullptr, nullptr, nullptr), SwsContextDeleter(ffmpeg_));
 
     if (!sws_ctx_) {
         Logger::error("Failed to create swscale context");
@@ -343,23 +344,23 @@ bool BrowserInput::resetEncoders() {
     Logger::info(">>> RESETTING ENCODERS: Recreating video and audio encoders (keeping CEF alive)");
 
     if (codec_ctx_) {
-        AVPacket* temp_pkt = FFmpegLib::av_packet_alloc();
-        FFmpegLib::avcodec_send_frame(codec_ctx_.get(), nullptr);
-        while (FFmpegLib::avcodec_receive_packet(codec_ctx_.get(), temp_pkt) == 0) {
-            FFmpegLib::av_packet_unref(temp_pkt);
+        AVPacket* temp_pkt = ffmpeg_->av_packet_alloc();
+        ffmpeg_->avcodec_send_frame(codec_ctx_.get(), nullptr);
+        while (ffmpeg_->avcodec_receive_packet(codec_ctx_.get(), temp_pkt) == 0) {
+            ffmpeg_->av_packet_unref(temp_pkt);
         }
-        FFmpegLib::av_packet_free(&temp_pkt);
+        ffmpeg_->av_packet_free(&temp_pkt);
         codec_ctx_.reset();
         Logger::info(">>> Flushed and freed old video encoder");
     }
 
     if (audio_codec_ctx_) {
-        AVPacket* temp_pkt = FFmpegLib::av_packet_alloc();
-        FFmpegLib::avcodec_send_frame(audio_codec_ctx_.get(), nullptr);
-        while (FFmpegLib::avcodec_receive_packet(audio_codec_ctx_.get(), temp_pkt) == 0) {
-            FFmpegLib::av_packet_unref(temp_pkt);
+        AVPacket* temp_pkt = ffmpeg_->av_packet_alloc();
+        ffmpeg_->avcodec_send_frame(audio_codec_ctx_.get(), nullptr);
+        while (ffmpeg_->avcodec_receive_packet(audio_codec_ctx_.get(), temp_pkt) == 0) {
+            ffmpeg_->av_packet_unref(temp_pkt);
         }
-        FFmpegLib::av_packet_free(&temp_pkt);
+        ffmpeg_->av_packet_free(&temp_pkt);
         audio_codec_ctx_.reset();
         Logger::info(">>> Flushed and freed old audio encoder");
     }
@@ -396,13 +397,13 @@ bool BrowserInput::setupAudioEncoder(int sample_rate, int channels, bool is_rese
     Logger::info("Setting up AAC audio encoder: " + std::to_string(channels) + " channels @ " +
                  std::to_string(sample_rate) + " Hz");
 
-    const AVCodec* codec = FFmpegLib::avcodec_find_encoder(AV_CODEC_ID_AAC);
+    const AVCodec* codec = ffmpeg_->avcodec_find_encoder(AV_CODEC_ID_AAC);
     if (!codec) {
         Logger::error("AAC encoder not found");
         return false;
     }
 
-    audio_codec_ctx_.reset(FFmpegLib::avcodec_alloc_context3(codec));
+    audio_codec_ctx_ = std::unique_ptr<AVCodecContext, AVCodecContextDeleter>(ffmpeg_->avcodec_alloc_context3(codec), AVCodecContextDeleter(ffmpeg_));
     if (!audio_codec_ctx_) {
         Logger::error("Failed to allocate audio codec context");
         return false;
@@ -418,21 +419,21 @@ bool BrowserInput::setupAudioEncoder(int sample_rate, int channels, bool is_rese
     audio_codec_ctx_->bit_rate = config_.audio.bitrate;
     audio_codec_ctx_->time_base = AVRational{1, sample_rate};
 
-    if (FFmpegLib::avcodec_open2(audio_codec_ctx_.get(), codec, nullptr) < 0) {
+    if (ffmpeg_->avcodec_open2(audio_codec_ctx_.get(), codec, nullptr) < 0) {
         Logger::error("Failed to open AAC encoder");
-        audio_codec_ctx_.reset();
+        audio_codec_ctx_ = nullptr;
         return false;
     }
 
     if (!is_reset) {
-        AVStream* audio_stream = FFmpegLib::avformat_new_stream(format_ctx_.get(), nullptr);
+        AVStream* audio_stream = ffmpeg_->avformat_new_stream(format_ctx_.get(), nullptr);
         if (!audio_stream) {
             Logger::error("Failed to create audio stream");
             return false;
         }
 
         audio_stream->time_base = audio_codec_ctx_->time_base;
-        FFmpegLib::avcodec_parameters_from_context(audio_stream->codecpar, audio_codec_ctx_.get());
+        ffmpeg_->avcodec_parameters_from_context(audio_stream->codecpar, audio_codec_ctx_.get());
         audio_stream_index_ = audio_stream->index;
         Logger::info("Created audio stream at index " + std::to_string(audio_stream_index_));
     } else {
@@ -440,11 +441,11 @@ bool BrowserInput::setupAudioEncoder(int sample_rate, int channels, bool is_rese
         if (audio_stream_index_ >= 0 && audio_stream_index_ < (int)format_ctx_->nb_streams) {
             AVStream* audio_stream = format_ctx_->streams[audio_stream_index_];
             audio_stream->time_base = audio_codec_ctx_->time_base;
-            FFmpegLib::avcodec_parameters_from_context(audio_stream->codecpar, audio_codec_ctx_.get());
+            ffmpeg_->avcodec_parameters_from_context(audio_stream->codecpar, audio_codec_ctx_.get());
         }
     }
 
-    audio_frame_.reset(FFmpegLib::av_frame_alloc());
+    audio_frame_ = std::unique_ptr<AVFrame, AVFrameDeleter>(ffmpeg_->av_frame_alloc(), AVFrameDeleter(ffmpeg_));
     if (!audio_frame_) {
         Logger::error("Failed to allocate audio frame");
         return false;
@@ -455,7 +456,7 @@ bool BrowserInput::setupAudioEncoder(int sample_rate, int channels, bool is_rese
     audio_frame_->sample_rate = audio_codec_ctx_->sample_rate;
     audio_frame_->nb_samples = audio_codec_ctx_->frame_size;
 
-    if (FFmpegLib::av_frame_get_buffer(audio_frame_.get(), 0) < 0) {
+    if (ffmpeg_->av_frame_get_buffer(audio_frame_.get(), 0) < 0) {
         Logger::error("Failed to allocate audio frame buffer");
         return false;
     }
@@ -475,7 +476,7 @@ bool BrowserInput::convertBGRAtoYUVWithCrop(const uint8_t* bgra_data, int src_wi
     const uint8_t* src_data[4] = { bgra_data, nullptr, nullptr, nullptr };
     int src_linesize[4] = { src_width * 4, 0, 0, 0 };
 
-    int ret = FFmpegLib::sws_scale(
+    int ret = ffmpeg_->sws_scale(
         sws_ctx_.get(),
         src_data,
         src_linesize,
@@ -503,13 +504,13 @@ bool BrowserInput::encodeFrame(AVFrame* frame, AVPacket* packet) {
         return false;
     }
 
-    int ret = FFmpegLib::avcodec_send_frame(codec_ctx_.get(), frame);
+    int ret = ffmpeg_->avcodec_send_frame(codec_ctx_.get(), frame);
     if (ret < 0) {
         Logger::error("Failed to send frame to encoder");
         return false;
     }
 
-    ret = FFmpegLib::avcodec_receive_packet(codec_ctx_.get(), packet);
+    ret = ffmpeg_->avcodec_receive_packet(codec_ctx_.get(), packet);
     if (ret == AVERROR(EAGAIN)) {
         return true;
     } else if (ret < 0) {
@@ -549,11 +550,11 @@ void BrowserInput::onFrameReceived(const uint8_t* bgra_data, int width, int heig
             }
         }
 
-        sws_ctx_.reset(FFmpegLib::sws_getContext(
+        sws_ctx_ = std::unique_ptr<SwsContext, SwsContextDeleter>(ffmpeg_->sws_getContext(
             adjusted_width, adjusted_height, AV_PIX_FMT_BGRA,
             config_.video.width, config_.video.height, AV_PIX_FMT_YUV420P,
             SWS_FAST_BILINEAR, nullptr, nullptr, nullptr
-        ));
+        ), SwsContextDeleter(ffmpeg_));
 
         if (!sws_ctx_) {
             Logger::error("Failed to recreate scaler context");
@@ -647,13 +648,13 @@ bool BrowserInput::encodeAudio(AVPacket* packet) {
 
     audio_buffer_.erase(audio_buffer_.begin(), audio_buffer_.begin() + samples_needed);
 
-    int ret = FFmpegLib::avcodec_send_frame(audio_codec_ctx_.get(), audio_frame_.get());
+    int ret = ffmpeg_->avcodec_send_frame(audio_codec_ctx_.get(), audio_frame_.get());
     if (ret < 0) {
         Logger::error("Error sending audio frame to encoder");
         return false;
     }
 
-    ret = FFmpegLib::avcodec_receive_packet(audio_codec_ctx_.get(), packet);
+    ret = ffmpeg_->avcodec_receive_packet(audio_codec_ctx_.get(), packet);
     if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
         return false;
     } else if (ret < 0) {

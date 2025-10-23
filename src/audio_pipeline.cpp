@@ -50,7 +50,8 @@ bool AudioPipeline::setupEncoder(AVStream* inStream, AVStream* outStream,
         return false;
     }
 
-    inputCodecCtx_.reset(ffmpeg_->avcodec_alloc_context3(audioDecoder));
+    inputCodecCtx_ = std::unique_ptr<AVCodecContext, AVCodecContextDeleter>(
+        ffmpeg_->avcodec_alloc_context3(audioDecoder), AVCodecContextDeleter(ffmpeg_));
     if (!inputCodecCtx_) {
         Logger::error("Failed to allocate audio decoder context");
         return false;
@@ -77,7 +78,8 @@ bool AudioPipeline::setupEncoder(AVStream* inStream, AVStream* outStream,
 
     Logger::info("Setting up AAC audio encoder");
 
-    outputCodecCtx_.reset(ffmpeg_->avcodec_alloc_context3(audioCodec));
+    outputCodecCtx_ = std::unique_ptr<AVCodecContext, AVCodecContextDeleter>(
+        ffmpeg_->avcodec_alloc_context3(audioCodec), AVCodecContextDeleter(ffmpeg_));
     if (!outputCodecCtx_) {
         Logger::error("Failed to allocate audio encoder context");
         return false;
@@ -137,10 +139,11 @@ bool AudioPipeline::setupEncoder(AVStream* inStream, AVStream* outStream,
         return false;
     }
 
-    swrCtx_.reset(swrCtxRaw);
+    swrCtx_ = std::unique_ptr<SwrContext, SwrContextDeleter>(swrCtxRaw, SwrContextDeleter(ffmpeg_));
 
     // Allocate cached frame for conversion
-    convertedFrame_.reset(ffmpeg_->av_frame_alloc());
+    convertedFrame_ = std::unique_ptr<AVFrame, AVFrameDeleter>(
+        ffmpeg_->av_frame_alloc(), AVFrameDeleter(ffmpeg_));
     if (!convertedFrame_) {
         Logger::error("Failed to allocate converted audio frame");
         return false;

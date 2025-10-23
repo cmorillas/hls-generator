@@ -12,6 +12,9 @@
 #include <vector>
 #include <memory>
 
+// Forward declarations
+class FFmpegContext;
+
 extern "C" {
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
@@ -20,7 +23,7 @@ extern "C" {
 
 class BrowserInput : public StreamInput {
 public:
-    BrowserInput(const AppConfig& config);
+    BrowserInput(const AppConfig& config, std::shared_ptr<FFmpegContext> ffmpegCtx);
     ~BrowserInput() override;
 
     bool open(const std::string& uri) override;
@@ -37,6 +40,7 @@ public:
     bool resetEncoders();
 
 private:
+    std::shared_ptr<FFmpegContext> ffmpeg_;
     std::unique_ptr<BrowserBackend> backend_;
 
     std::unique_ptr<AVFormatContext, AVFormatContextDeleter> format_ctx_;

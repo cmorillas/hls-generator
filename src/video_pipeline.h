@@ -14,6 +14,7 @@ struct AVFormatContext;
 struct AVCodecContext;
 struct AVBSFContext;
 struct SwsContext;
+struct AVRational;
 
 /**
  * VideoPipeline - Handles video processing (REMUX, TRANSCODE, or PROGRAMMATIC)
@@ -89,6 +90,23 @@ public:
     bool convertAndEncodeFrame(AVFrame* inputFrame, int64_t pts);
 
     /**
+     * Decode a packet to frames (TRANSCODE mode)
+     * @param packet Input packet to decode
+     * @param frame Output frame (caller must allocate)
+     * @param frameAvailable Set to true if a frame was decoded
+     * @return true on success
+     */
+    bool decodePacket(AVPacket* packet, AVFrame* frame, bool& frameAvailable);
+
+    /**
+     * Receive encoded packet from encoder (TRANSCODE mode)
+     * @param packet Output packet (caller must allocate)
+     * @param packetAvailable Set to true if a packet was received
+     * @return true on success
+     */
+    bool receiveEncodedPacket(AVPacket* packet, bool& packetAvailable);
+
+    /**
      * Process bitstream filter for a packet (REMUX/PROGRAMMATIC modes)
      * @param packet Packet to filter
      * @param outputFormatCtx Output format context
@@ -143,6 +161,11 @@ public:
      * Get input codec name
      */
     std::string getInputCodecName() const { return inputCodecName_; }
+
+    /**
+     * Get input codec context (for TRANSCODE mode)
+     */
+    AVCodecContext* getInputCodecContext() { return inputCodecCtx_.get(); }
 
     /**
      * Get output codec context (for TRANSCODE mode)

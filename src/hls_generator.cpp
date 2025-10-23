@@ -3,7 +3,7 @@
 #include "logger.h"
 
 HLSGenerator::HLSGenerator(const AppConfig& config)
-    : config_(config), ffmpegWrapper_(std::make_unique<FFmpegWrapper>()) {
+    : config_(config), ffmpegWrapper_(std::make_unique<FFmpegWrapper>(config)) {
 }
 
 HLSGenerator::~HLSGenerator() = default;
@@ -19,15 +19,12 @@ bool HLSGenerator::initialize(const std::string& ffmpegLibPath) {
         return false;
     }
 
-    // Set config BEFORE openInput so backends receive correct configuration
-    ffmpegWrapper_->setConfig(config_);
-
     if (!ffmpegWrapper_->openInput(config_.hls.inputFile)) {
         Logger::error("Failed to open input file");
         return false;
     }
 
-    if (!ffmpegWrapper_->setupOutput(config_)) {
+    if (!ffmpegWrapper_->setupOutput()) {
         Logger::error("Failed to setup HLS output");
         return false;
     }

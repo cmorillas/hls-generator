@@ -8,6 +8,9 @@
 #include "ffmpeg_deleters.h"
 
 class StreamInput;
+class FFmpegContext;
+class VideoPipeline;
+class AudioPipeline;
 
 struct AVFormatContext;
 struct AVCodecContext;
@@ -20,13 +23,12 @@ struct SwrContext;
 
 class FFmpegWrapper {
 public:
-    FFmpegWrapper();
+    explicit FFmpegWrapper(const AppConfig& config);
     ~FFmpegWrapper();
 
     bool loadLibraries(const std::string& libPath);
-    void setConfig(const AppConfig& config) { config_ = config; }
     bool openInput(const std::string& uri);
-    bool setupOutput(const AppConfig& config);
+    bool setupOutput();
     bool resetOutput();
 
     bool processVideo();
@@ -41,23 +43,21 @@ public:
 private:
     bool initialized_ = false;
 
+    // Shared FFmpeg context (loaded once, shared among all pipelines)
+    std::shared_ptr<FFmpegContext> ffmpegCtx_;
+
+    // Specialized pipelines
+    std::unique_ptr<VideoPipeline> videoPipeline_;
+    std::unique_ptr<AudioPipeline> audioPipeline_;
+
     std::unique_ptr<StreamInput> streamInput_;
     AVFormatContext* inputFormatCtx_ = nullptr;
-    std::unique_ptr<AVCodecContext, AVCodecContextDeleter> inputCodecCtx_;
-    std::unique_ptr<AVCodecContext, AVCodecContextDeleter> inputAudioCodecCtx_;
     int videoStreamIndex_ = -1;
     int audioStreamIndex_ = -1;
 
     std::unique_ptr<AVFormatContext, AVFormatContextDeleter> outputFormatCtx_;
-    std::unique_ptr<AVCodecContext, AVCodecContextDeleter> outputCodecCtx_;
-    std::unique_ptr<AVCodecContext, AVCodecContextDeleter> outputAudioCodecCtx_;
     int outputVideoStreamIndex_ = -1;
     int outputAudioStreamIndex_ = -1;
-
-    std::unique_ptr<AVBSFContext, AVBSFContextDeleter> bsfCtx_;
-    std::unique_ptr<SwsContext, SwsContextDeleter> swsCtx_;
-    std::unique_ptr<SwrContext, SwrContextDeleter> swrCtx_;
-    std::unique_ptr<AVFrame, AVFrameDeleter> convertedFrame_;  // Cached frame for audio conversion
 
     enum class ProcessingMode {
         REMUX,
@@ -70,33 +70,18 @@ private:
     int height_ = 0;
     double fps_ = 0.0;
     double duration_ = 0.0;
-    int inputCodecId_ = 0;
-    std::string inputCodecName_;
 
-    // Audio transcoding state
-    bool audioNeedsTranscoding_ = false;
-    int inputAudioCodecId_ = 0;
-    int64_t lastAudioPts_ = 0;  // Last valid audio PTS (for synthetic PTS generation)
-    bool audioPtsInitialized_ = false;  // Track if we've received first valid PTS
-    bool audioPtsWarningShown_ = false;  // Track if we've warned about missing PTS (avoid log spam)
-
-    AppConfig config_;
+    const AppConfig config_;  // Immutable configuration
     int reload_count_ = 0;
     std::string input_uri_;
 
     std::function<bool()> interruptCallback_;
 
     bool openInputCodec();
-    bool setupEncoder();
-    bool setupAudioEncoder(AVStream* outAudioStream);
     bool detectAndDecideProcessingMode();
-    bool setupBitstreamFilter();
     bool processVideoRemux();
     bool processVideoTranscode();
     bool processVideoProgrammatic();
-
-    // Helper function to convert and encode a frame with SwsContext if needed
-    bool convertAndEncodeFrame(AVFrame* inputFrame, int64_t pts);
 };
 
 #endif // FFMPEG_WRAPPER_H

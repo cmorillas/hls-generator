@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(hls-generator VERSION 1.3.0)
+project(hls-generator VERSION 1.4.0)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -180,11 +180,10 @@ set(SOURCES
     src/main.cpp
     src/obs_detector.cpp
     src/logger.cpp
-    src/ffmpeg_loader.cpp
     src/ffmpeg_context.cpp
+    src/ffmpeg_deleters.cpp
     src/video_pipeline.cpp
     src/audio_pipeline.cpp
-    src/muxer_manager.cpp
     src/ffmpeg_wrapper.cpp
     src/cef_loader.cpp
     src/cef_function_wrappers.cpp

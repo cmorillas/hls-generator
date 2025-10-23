@@ -2,54 +2,76 @@
 #ifndef FFMPEG_DELETERS_H
 #define FFMPEG_DELETERS_H
 
-#include "ffmpeg_loader.h"
+#include <memory>
+
+// Forward declaration
+class FFmpegContext;
+
+// Forward declarations for FFmpeg types
+extern "C" {
+struct AVFormatContext;
+struct AVCodecContext;
+struct AVFrame;
+struct SwsContext;
+struct AVBSFContext;
+struct SwrContext;
+}
+
+// Deleters that use FFmpegContext instead of FFmpegLib
+// These are used by components that have been migrated to FFmpegContext
 
 struct AVFormatContextDeleter {
-    void operator()(AVFormatContext* ctx) const {
-        if (ctx) {
-            FFmpegLib::avformat_free_context(ctx);
-        }
-    }
+    std::shared_ptr<FFmpegContext> ffmpeg;
+
+    AVFormatContextDeleter() = default;
+    explicit AVFormatContextDeleter(std::shared_ptr<FFmpegContext> ctx) : ffmpeg(ctx) {}
+
+    void operator()(AVFormatContext* ctx) const;
 };
 
 struct AVCodecContextDeleter {
-    void operator()(AVCodecContext* ctx) const {
-        if (ctx) {
-            FFmpegLib::avcodec_free_context(&ctx);
-        }
-    }
+    std::shared_ptr<FFmpegContext> ffmpeg;
+
+    AVCodecContextDeleter() = default;
+    explicit AVCodecContextDeleter(std::shared_ptr<FFmpegContext> ctx) : ffmpeg(ctx) {}
+
+    void operator()(AVCodecContext* ctx) const;
 };
 
 struct AVFrameDeleter {
-    void operator()(AVFrame* frame) const {
-        if (frame) {
-            FFmpegLib::av_frame_free(&frame);
-        }
-    }
+    std::shared_ptr<FFmpegContext> ffmpeg;
+
+    AVFrameDeleter() = default;
+    explicit AVFrameDeleter(std::shared_ptr<FFmpegContext> ctx) : ffmpeg(ctx) {}
+
+    void operator()(AVFrame* frame) const;
 };
 
 struct SwsContextDeleter {
-    void operator()(SwsContext* ctx) const {
-        if (ctx) {
-            FFmpegLib::sws_freeContext(ctx);
-        }
-    }
+    std::shared_ptr<FFmpegContext> ffmpeg;
+
+    SwsContextDeleter() = default;
+    explicit SwsContextDeleter(std::shared_ptr<FFmpegContext> ctx) : ffmpeg(ctx) {}
+
+    void operator()(SwsContext* ctx) const;
 };
 
 struct AVBSFContextDeleter {
-    void operator()(AVBSFContext* ctx) const {
-        if (ctx) {
-            FFmpegLib::av_bsf_free(&ctx);
-        }
-    }
+    std::shared_ptr<FFmpegContext> ffmpeg;
+
+    AVBSFContextDeleter() = default;
+    explicit AVBSFContextDeleter(std::shared_ptr<FFmpegContext> ctx) : ffmpeg(ctx) {}
+
+    void operator()(AVBSFContext* ctx) const;
 };
 
 struct SwrContextDeleter {
-    void operator()(SwrContext* ctx) const {
-        if (ctx) {
-            FFmpegLib::swr_free(&ctx);
-        }
-    }
+    std::shared_ptr<FFmpegContext> ffmpeg;
+
+    SwrContextDeleter() = default;
+    explicit SwrContextDeleter(std::shared_ptr<FFmpegContext> ctx) : ffmpeg(ctx) {}
+
+    void operator()(SwrContext* ctx) const;
 };
 
 #endif // FFMPEG_DELETERS_H

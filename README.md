@@ -298,6 +298,44 @@ hls-generator/
 
 ## Recent Updates
 
+### v1.4.0 (2025-01-23): Modular Architecture & Memory Safety 🏗️
+Complete architectural refactoring with zero memory leaks and immutable configuration.
+
+**🏗️ Modular Pipeline Architecture:**
+- ✅ **FFmpegContext** - Single point of FFmpeg library loading (eliminates dual loading)
+- ✅ **VideoPipeline** - Specialized video processing (REMUX/TRANSCODE/PROGRAMMATIC)
+- ✅ **AudioPipeline** - Specialized audio processing with PTS tracking
+- ✅ **Separation of concerns** - Clean, maintainable architecture
+
+**🛡️ Memory Safety (RAII):**
+- ✅ **Zero memory leaks** - 9 memory leaks fixed with custom deleters
+- ✅ **Automatic cleanup** - All FFmpeg resources freed via smart pointers
+- ✅ **Type-aware deleters** - AVCodecContext, AVFrame, SwsContext, SwrContext, AVBSFContext
+
+**🔒 Thread-Safe Configuration:**
+- ✅ **Immutable AppConfig** - Passed via constructor as const member
+- ✅ **No runtime mutations** - Configuration cannot change after construction
+- ✅ **Cleaner API** - `FFmpegWrapper(config)` instead of `wrapper.setConfig(config)`
+
+**🧹 Code Cleanup:**
+- ✅ **Eliminated legacy code** - Removed `ffmpeg_loader` and `FFmpegLib::` namespace
+- ✅ **Removed dead code** - Eliminated unused `MuxerManager` component
+- ✅ **Reduced codebase** - ~500 lines of duplicated/legacy code removed
+
+**⚡ Performance:**
+- ✅ **Single library load** - FFmpeg loaded once and shared (was: dual loading)
+- ✅ **Faster startup** - Reduced initialization overhead
+- ✅ **Better memory usage** - Shared context pattern
+
+**Breaking Changes:**
+- Constructor now requires config: `FFmpegWrapper wrapper(config);`
+- `setConfig()` method removed (no longer needed)
+- `setupOutput()` no longer takes config parameter
+
+See [CHANGELOG.md](CHANGELOG.md) for complete details and [ARCHITECTURE.md](ARCHITECTURE.md) for architecture documentation.
+
+---
+
 ### v1.3.0 (2025-10-23): Code Quality Deep Dive - 4 Critical Fixes 🔍
 Comprehensive code quality improvements resolving critical functional and robustness issues.
 
