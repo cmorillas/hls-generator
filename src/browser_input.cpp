@@ -74,6 +74,11 @@ bool BrowserInput::open(const std::string& uri) {
         return false;
     }
 
+    // Create SMPTE test bars placeholder (non-critical, continue if fails)
+    if (!createSMPTEFrame()) {
+        Logger::warn("Failed to create SMPTE placeholder frame - will skip placeholders");
+    }
+
     if (!setupAudioEncoder(config_.audio.sample_rate, config_.audio.channels)) {
         Logger::error("Failed to setup audio encoder - stream will have no audio");
     } else {
@@ -139,8 +144,36 @@ bool BrowserInput::readPacket(AVPacket* packet) {
     }
 
     if (!backend_->isPageLoaded()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        // Generate SMPTE test bars while CEF loads page
+        if (smpte_frame_) {
+            // Initialize timing on first frame
+            if (start_time_ms_ == 0) {
+                start_time_ms_ = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count();
+                Logger::info(">>> SMPTE placeholder: Starting test bars generation while page loads...");
+            }
+
+            // Encode SMPTE frame
+            if (encodeFrame(smpte_frame_.get(), packet)) {
+                frame_count_++;
+                if (frame_count_ == 1) {
+                    Logger::info(">>> SMPTE placeholder: First test bar frame encoded");
+                } else if (frame_count_ % 30 == 0) {
+                    Logger::info(">>> SMPTE placeholder: Still loading page... (" + std::to_string(frame_count_/30) + "s)");
+                }
+                return true;
+            }
+        }
+
+        // Fallback: wait without generating frames
+        std::this_thread::sleep_for(std::chrono::milliseconds(16)); // ~60fps timing
         return true;
+    }
+
+    // Page loaded - transition to real frames
+    if (smpte_frame_ && frame_count_ > 0) {
+        Logger::info(">>> SMPTE placeholder: Page loaded! Transitioning to real video content...");
+        smpte_frame_.reset(); // Free SMPTE frame (no longer needed)
     }
 
     pullAudioFromBackend();
@@ -668,4 +701,68 @@ bool BrowserInput::encodeAudio(AVPacket* packet) {
 
 bool BrowserInput::hasAudioData() const {
     return !audio_buffer_.empty();
+}
+
+void BrowserInput::fillSMPTEBars(AVFrame* frame) {
+    int width = frame->width;   // 1280
+    int height = frame->height; // 720
+    int bar_width = width / 7;
+
+    // 7 SMPTE color bars: White, Yellow, Cyan, Green, Magenta, Red, Blue
+    struct YUV {
+        uint8_t y, u, v;
+    };
+
+    YUV colors[7] = {
+        {235, 128, 128}, // White
+        {210,  16, 146}, // Yellow
+        {170, 166,  16}, // Cyan
+        {145,  54,  34}, // Green
+        {106, 202, 222}, // Magenta
+        { 81,  90, 240}, // Red
+        { 41, 240, 110}  // Azul
+    };
+
+    // Fill Y plane (luminance) - full resolution
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            int bar_index = (x / bar_width) % 7;
+            frame->data[0][y * frame->linesize[0] + x] = colors[bar_index].y;
+        }
+    }
+
+    // Fill U and V planes (chrominance) - subsampled (YUV420)
+    for (int y = 0; y < height/2; y++) {
+        for (int x = 0; x < width/2; x++) {
+            int bar_index = ((x*2) / bar_width) % 7;
+            frame->data[1][y * frame->linesize[1] + x] = colors[bar_index].u;
+            frame->data[2][y * frame->linesize[2] + x] = colors[bar_index].v;
+        }
+    }
+}
+
+bool BrowserInput::createSMPTEFrame() {
+    AVFrame* frame = ffmpeg_->av_frame_alloc();
+    if (!frame) {
+        Logger::warn("Failed to allocate SMPTE frame");
+        return false;
+    }
+
+    frame->format = AV_PIX_FMT_YUV420P;
+    frame->width = config_.video.width;
+    frame->height = config_.video.height;
+
+    if (ffmpeg_->av_frame_get_buffer(frame, 0) < 0) {
+        ffmpeg_->av_frame_free(&frame);
+        Logger::warn("Failed to get buffer for SMPTE frame");
+        return false;
+    }
+
+    fillSMPTEBars(frame);
+
+    smpte_frame_ = std::unique_ptr<AVFrame, AVFrameDeleter>(
+        frame, AVFrameDeleter(ffmpeg_));
+
+    Logger::info("SMPTE test bars placeholder created");
+    return true;
 }

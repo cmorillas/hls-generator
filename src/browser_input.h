@@ -78,6 +78,11 @@ private:
 
     std::function<bool()> pageReloadCallback_;
 
+    // SMPTE test bars placeholder
+    std::unique_ptr<AVFrame, AVFrameDeleter> smpte_frame_;
+    bool createSMPTEFrame();
+    void fillSMPTEBars(AVFrame* frame);
+
     bool setupEncoder(bool is_reset = false);
     bool setupAudioEncoder(int sample_rate, int channels, bool is_reset = false);
     bool convertBGRAtoYUV(const uint8_t* bgra_data, AVFrame* yuv_frame);

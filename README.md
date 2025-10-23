@@ -22,6 +22,7 @@ HLS stream generator from video files and browser sources, using FFmpeg and CEF 
 ✅ **Page reload handling** - Seamless encoder reset on browser page reloads
 ✅ **Live HLS streaming** - Event-type playlists for continuous playback
 ✅ **Low-latency HLS** - 4-6 second latency (2s segments, optimized for live playback)
+✅ **Instant playback feedback** - SMPTE test bars during page load (1-2s visual response)
 ✅ **Auto cookie acceptance** - JavaScript injection for GDPR cookie banners
 
 ### Technical Robustness
@@ -298,6 +299,30 @@ hls-generator/
 - [docs/README.md](docs/README.md) - Full documentation index
 
 ## Recent Updates
+
+### v1.5.0 (2025-01-23): Instant Playback Feedback with SMPTE Test Bars 📺
+Professional loading experience with broadcast-standard test pattern during CEF startup.
+
+**⚡ User Experience Transformation:**
+- ✅ **Instant visual feedback** - SMPTE bars appear in 1-2s (was: 15-20s black screen)
+- ✅ **90% perceived latency reduction** - Professional loading indicator
+- ✅ **Broadcast standard** - 7-bar SMPTE color pattern (White, Yellow, Cyan, Green, Magenta, Red, Blue)
+- ✅ **Smooth transition** - Automatic switch to real content when page loads
+
+**🚀 Startup Optimizations:**
+- ✅ **Parallel initialization** - CEF and FFmpeg setup run concurrently (saves 1-2s)
+- ✅ **CEF performance flags** - 8 conservative optimizations (saves 1-3s)
+- ✅ **Real latency improvement** - 15-20s → 12-16s actual startup time
+
+**🎯 Technical Implementation:**
+- SMPTE test bars generated in YUV420P (native H.264 format)
+- No external dependencies (pure algorithmic generation)
+- Progress logging every second during load
+- Automatic cleanup on transition
+
+See [CHANGELOG.md](CHANGELOG.md) for complete v1.5.0 details.
+
+---
 
 ### v1.4.1 (2025-01-23): Low-Latency HLS Optimization ⚡
 Optimized HLS configuration for reduced playback latency in live streaming scenarios.

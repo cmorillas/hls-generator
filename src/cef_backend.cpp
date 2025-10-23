@@ -52,12 +52,22 @@ public:
         command_line->AppendSwitchWithValue("disable-features", "HardwareMediaKeyHandling,WebBluetooth");
         command_line->AppendSwitchWithValue("autoplay-policy", "no-user-gesture-required");
 
+        // Performance optimizations (conservative profile)
+        command_line->AppendSwitch("disable-gpu");
+        command_line->AppendSwitch("disable-software-rasterizer");
+        command_line->AppendSwitch("no-proxy-server");
+        command_line->AppendSwitch("disable-extensions");
+        command_line->AppendSwitch("disable-plugins");
+        command_line->AppendSwitch("disable-background-networking");
+        command_line->AppendSwitch("no-first-run");
+        command_line->AppendSwitch("no-default-browser-check");
+
         #ifndef _WIN32
         // Linux-specific: Critical for subprocess stability
         command_line->AppendSwitchWithValue("ozone-platform", "x11");
         #endif
 
-        Logger::info("CEF command line configured (OBS-style, multi-process)");
+        Logger::info("CEF command line configured (OBS-style, multi-process, optimized startup)");
     }
 
 private:
