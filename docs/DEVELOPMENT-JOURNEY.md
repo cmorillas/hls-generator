@@ -7676,3 +7676,132 @@ El usuario observó correctamente que la mejora no es dramática porque:
 
 ---
 
+## Estado del Proyecto (Actualizado: 2025-01-23)
+
+### Versión Actual: v1.4.1
+
+**Últimas versiones publicadas:**
+- **v1.4.1** (2025-01-23): Low-Latency HLS Configuration
+- **v1.4.0** (2025-01-23): Modular Architecture & Memory Safety
+- **v1.3.0** (2025-01-19): Code Quality Deep Dive
+
+### Arquitectura Actual
+
+**Componentes principales:**
+```
+FFmpegWrapper (orchestrator)
+├── FFmpegContext (shared_ptr) - Single FFmpeg library load
+│   ├── VideoPipeline - Video processing (REMUX/TRANSCODE/PROGRAMMATIC)
+│   ├── AudioPipeline - Audio processing with PTS tracking
+│   ├── BrowserInput - CEF browser capture
+│   └── FFmpegInput - File/URL input
+└── AppConfig (const) - Immutable configuration
+```
+
+**Características clave:**
+- ✅ **Zero memory leaks** - 9 leaks corregidos con RAII
+- ✅ **Single FFmpeg load** - Eliminada carga dual
+- ✅ **Immutable configuration** - AppConfig const en constructor
+- ✅ **Low-latency HLS** - 2s segments, 3 playlist size
+- ✅ **Modular design** - Separation of concerns
+
+### Configuración HLS Actual
+
+```cpp
+// src/config.h
+struct HLSConfig {
+    int segmentDuration = 2;  // Low-latency (was 3s)
+    int playlistSize = 3;     // Fast startup (was 5)
+};
+
+struct VideoConfig {
+    int width = 1280;
+    int height = 720;
+    int fps = 30;
+    int bitrate = 2500000;
+    int gop_size = 60;  // Aligned with 2s segments
+};
+```
+
+### Estado de Compilación
+
+**Linux**: ✅ Funcional
+- Binary: `build/hls-generator` (1.6 MB stripped)
+- Tested: YouTube URLs, file inputs
+- No memory leaks detectados
+
+**Windows**: ✅ Funcional
+- Binary: `build-windows/hls-generator.exe` (2.3 MB stripped)
+- Cross-compiled desde Linux con MinGW
+- Fully static (no DLLs needed)
+
+### Código Legacy Eliminado
+
+- ❌ `src/ffmpeg_loader.{h,cpp}` - Replaced by FFmpegContext
+- ❌ `src/muxer_manager.{h,cpp}` - Dead code removed
+- ❌ `FFmpegLib::` namespace - All code uses FFmpegContext
+- ❌ Dual FFmpeg loading - Single initialization only
+
+### Próximas Mejoras Potenciales
+
+**No urgentes, solo si se necesitan:**
+1. **Reducir latencia CEF** (~10-15s startup):
+   - Pre-inicializar CEF en background
+   - Pool de instancias CEF reutilizables
+   - Headless Chrome como alternativa
+
+2. **Configuración runtime**:
+   - Parámetros CLI para segment duration
+   - Ajuste dinámico de bitrate
+   - Perfiles de calidad (low/medium/high)
+
+3. **Monitoreo y métricas**:
+   - Estadísticas de encoding en tiempo real
+   - Detección de frame drops
+   - Logging de latencia real
+
+4. **Testing automatizado**:
+   - Unit tests para pipelines
+   - Integration tests con URLs reales
+   - Valgrind/AddressSanitizer CI
+
+### Limitaciones Conocidas
+
+1. **Latencia inicial alta (~15-20s)**:
+   - CEF startup: ~10-15s (inevitable sin pre-init)
+   - HLS buffering: ~4-6s (optimizado v1.4.1)
+   - **No optimizable** sin cambios arquitectónicos mayores
+
+2. **Resolución fija**: 1280x720@30fps
+   - Configurable en config.h pero requiere recompilación
+   - Posible mejora: parámetros CLI
+
+3. **Single browser instance**:
+   - Solo una captura CEF simultánea
+   - Múltiples instancias requeriría proceso separado
+
+### Notas para Próxima Sesión
+
+**Todo está funcionando y testeado. No hay problemas pendientes.**
+
+Si necesitas continuar desarrollo:
+1. Lee `ARCHITECTURE.md` para entender diseño modular
+2. Lee `CHANGELOG.md` para ver historial de cambios
+3. Los binarios v1.4.1 están en GitHub release
+4. Configuración HLS en `src/config.h` (2s/3 segments)
+
+**Comandos útiles:**
+```bash
+# Compilar
+cmake --build build
+cmake --build build-windows
+
+# Probar
+./build/hls-generator browser://https://youtube.com/... output/
+
+# Ver configuración actual
+grep -A5 "struct HLSConfig" src/config.h
+```
+
+---
+
