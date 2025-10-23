@@ -54,7 +54,7 @@ public:
 
         // Performance optimizations (conservative profile)
         command_line->AppendSwitch("disable-gpu");
-        command_line->AppendSwitch("disable-software-rasterizer");
+        // NOTE: DO NOT disable-software-rasterizer - CEF needs it when GPU is disabled
         command_line->AppendSwitch("no-proxy-server");
         command_line->AppendSwitch("disable-extensions");
         command_line->AppendSwitch("disable-plugins");
