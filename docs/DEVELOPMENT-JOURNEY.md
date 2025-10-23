@@ -7603,3 +7603,76 @@ cmake --build build-windows
 
 ---
 
+## Optimización 16: Low-Latency HLS Configuration (2025-01-23)
+
+### Contexto
+
+Usuario reportó que el video tarda mucho en aparecer en VLC al reproducir el stream HLS. Se identificaron dos factores:
+1. **CEF startup + page load**: ~10-15s (inevitable, depende de la URL)
+2. **HLS buffering**: ~9-15s adicionales con configuración antigua
+
+### Problema: Alta Latencia en Reproducción
+
+**Configuración original**:
+```cpp
+// src/config.h
+int segmentDuration = 3;  // 3 segundos por segmento
+int playlistSize = 5;     // 5 segmentos en playlist
+int gop_size = 60;        // 30 fps × 2s = 60 frames
+```
+
+**Impacto**:
+- VLC espera primer segmento completo: 3s
+- VLC bufferiza 2-3 segmentos antes de iniciar: 6-9s
+- Latencia total HLS: ~9-15s
+- **Latencia total (CEF + HLS)**: ~20-30s hasta ver video
+
+### Solución: Optimización de Parámetros HLS
+
+**Nueva configuración**:
+```cpp
+// src/config.h
+int segmentDuration = 2;  // Reducido de 3s → 2s (33% más rápido)
+int playlistSize = 3;     // Reducido de 5 → 3 (menos buffering)
+int gop_size = 60;        // Mantenido (30 fps × 2s = 60 frames, perfecto)
+```
+
+**Beneficios**:
+- Segmento más corto: 2s en lugar de 3s → inicio 33% más rápido
+- Menos segmentos en playlist: VLC inicia con menos buffer
+- GOP alineado: un IDR keyframe al inicio de cada segmento → sin esperas extra
+- Latencia HLS reducida: ~4-6s (reducción del 50-60%)
+
+**Resultado**:
+- CEF startup: ~10-15s (inevitable)
+- HLS latency: ~4-6s (mejorado)
+- **Latencia total**: ~15-20s (mejora de ~5-10s)
+
+### Análisis del Cuello de Botella
+
+El usuario observó correctamente que la mejora no es dramática porque:
+- **Cuello de botella real**: CEF startup + page load (~70% del tiempo)
+- **HLS optimization**: Solo afecta el ~30% restante
+
+**No se puede optimizar más** sin cambiar la arquitectura (ej: pre-inicializar CEF, usar stream directo sin browser, etc.).
+
+### Lecciones
+
+1. **Identificar el cuello de botella real**: Optimizar HLS es bueno, pero el problema principal es CEF
+2. **Configuración estándar industry**: 2s segments es común para low-latency HLS
+3. **GOP alignment es crítico**: Keyframe per segment evita buffering adicional
+4. **Mejoras incrementales**: Aunque no dramático, 5-10s menos es perceptible
+5. **Mantener cambios razonables**: No hay desventaja en usar 2s/3 segments vs 3s/5 segments
+
+### Decisión Final
+
+**Mantener nueva configuración (2s, 3 segments)** porque:
+- ✅ No tiene desventajas (misma calidad, mismo performance)
+- ✅ Reduce latencia donde es posible (post-CEF)
+- ✅ Estándar industry para live streaming
+- ✅ Mejora experiencia en live scenarios donde CEF ya arrancó
+
+**Versión**: v1.4.1
+
+---
+

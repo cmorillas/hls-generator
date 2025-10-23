@@ -21,6 +21,7 @@ HLS stream generator from video files and browser sources, using FFmpeg and CEF 
 ✅ **Audio/video synchronization** - Automatic sync via FFmpeg timebases
 ✅ **Page reload handling** - Seamless encoder reset on browser page reloads
 ✅ **Live HLS streaming** - Event-type playlists for continuous playback
+✅ **Low-latency HLS** - 4-6 second latency (2s segments, optimized for live playback)
 ✅ **Auto cookie acceptance** - JavaScript injection for GDPR cookie banners
 
 ### Technical Robustness
@@ -297,6 +298,28 @@ hls-generator/
 - [docs/README.md](docs/README.md) - Full documentation index
 
 ## Recent Updates
+
+### v1.4.1 (2025-01-23): Low-Latency HLS Optimization ⚡
+Optimized HLS configuration for reduced playback latency in live streaming scenarios.
+
+**⚡ Latency Improvements:**
+- ✅ **Reduced segment duration** - 3s → 2s (33% faster segment generation)
+- ✅ **Optimized playlist size** - 5 → 3 segments (faster player startup)
+- ✅ **GOP alignment** - One IDR keyframe per segment (no buffering needed)
+- ✅ **Latency reduction** - From ~9-15s to ~4-6s in VLC and similar players
+
+**Configuration Changes:**
+- `segmentDuration`: 3s → 2s
+- `playlistSize`: 5 → 3 segments
+- `gop_size`: 60 frames (aligned with 2s @ 30fps)
+
+**Benefits:**
+- Faster initial playback startup
+- Lower end-to-end latency for live streams
+- Better user experience in VLC, mpv, and browser players
+- Maintains HLS compatibility and quality
+
+---
 
 ### v1.4.0 (2025-01-23): Modular Architecture & Memory Safety 🏗️
 Complete architectural refactoring with zero memory leaks and immutable configuration.

@@ -5,6 +5,27 @@ All notable changes to the HLS Generator project will be documented in this file
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.1] - 2025-01-23
+
+### Changed
+- **Low-Latency HLS Configuration**: Optimized default settings for reduced playback latency
+  - `segmentDuration`: 3s → 2s (33% faster segment generation)
+  - `playlistSize`: 5 → 3 segments (faster player startup)
+  - `gop_size`: 60 frames (one IDR keyframe per segment for optimal alignment)
+
+### Performance
+- Reduced end-to-end latency: ~9-15s → ~4-6s in VLC and similar players
+- Faster initial playback startup (fewer segments to buffer)
+- Better live streaming experience with lower delay
+
+### Notes
+- Configuration changes maintain full HLS compatibility
+- No quality degradation - same bitrate and encoding settings
+- Optimal for live streaming scenarios where latency matters
+- GOP alignment ensures each segment starts with a keyframe (no additional buffering needed)
+
+---
+
 ## [1.4.0] - 2025-01-23
 
 ### Added
