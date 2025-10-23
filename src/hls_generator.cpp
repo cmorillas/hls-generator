@@ -22,16 +22,15 @@ bool HLSGenerator::initialize(const std::string& ffmpegLibPath) {
         return false;
     }
 
-    // STEP 2: Parallelize openInput() and setupOutput() (they are independent)
+    // STEP 2: Parallelize setupOutput() in background thread
+    // NOTE: openInput() with CEF MUST stay on main thread (CEF requires UI thread)
     std::atomic<bool> outputSetupSuccess(false);
-    std::atomic<bool> inputOpenSuccess(false);
     std::atomic<bool> outputThreadException(false);
-    std::atomic<bool> inputThreadException(false);
 
-    // Thread 1: Setup output (fast, ~100ms)
+    // Background thread: Setup output (fast, ~100ms)
     std::thread outputThread([&]() {
         try {
-            Logger::info(">>> Setting up HLS output in parallel...");
+            Logger::info(">>> Setting up HLS output in background...");
             outputSetupSuccess = ffmpegWrapper_->setupOutput();
             Logger::info(">>> HLS output setup completed");
         } catch (const std::exception& e) {
@@ -43,33 +42,17 @@ bool HLSGenerator::initialize(const std::string& ffmpegLibPath) {
         }
     });
 
-    // Thread 2: Open input (slow, ~10-15s with CEF)
-    std::thread inputThread([&]() {
-        try {
-            Logger::info(">>> Opening input in parallel...");
-            inputOpenSuccess = ffmpegWrapper_->openInput(config_.hls.inputFile);
-            Logger::info(">>> Input open completed");
-        } catch (const std::exception& e) {
-            Logger::error("Exception in openInput thread: " + std::string(e.what()));
-            inputThreadException = true;
-        } catch (...) {
-            Logger::error("Unknown exception in openInput thread");
-            inputThreadException = true;
-        }
-    });
+    // STEP 3: Open input on MAIN thread (CEF requires this)
+    Logger::info(">>> Opening input on main thread (CEF requirement)...");
+    bool inputOpenSuccess = ffmpegWrapper_->openInput(config_.hls.inputFile);
+    Logger::info(">>> Input open completed");
 
-    // STEP 3: Wait for both threads
+    // STEP 4: Wait for background thread to finish
     outputThread.join();
-    inputThread.join();
 
-    // STEP 4: Check results
+    // STEP 5: Check results
     if (outputThreadException) {
         Logger::error("Exception occurred in setupOutput thread");
-        return false;
-    }
-
-    if (inputThreadException) {
-        Logger::error("Exception occurred in openInput thread");
         return false;
     }
 
@@ -83,7 +66,7 @@ bool HLSGenerator::initialize(const std::string& ffmpegLibPath) {
         return false;
     }
 
-    Logger::info(">>> Parallel initialization successful");
+    Logger::info(">>> Initialization successful (setupOutput parallelized)");
     initialized_ = true;
     return true;
 }
