@@ -16,35 +16,46 @@ bool HLSGenerator::initialize(const std::string& ffmpegLibPath) {
     Logger::info("  Output: " + config_.hls.outputDir);
     Logger::info("  FFmpeg libs: " + ffmpegLibPath);
 
-    // Parallel initialization: CEF in thread, FFmpeg in main
+    // Parallel initialization: FFmpeg libs + setupOutput, then openInput
+    std::atomic<bool> ffmpegReady(false);
     std::atomic<bool> inputOpenSuccess(false);
-    std::atomic<bool> inputOpenComplete(false);
 
-    std::thread cefThread([&]() {
-        Logger::info(">>> Starting CEF initialization in parallel...");
-        inputOpenSuccess = ffmpegWrapper_->openInput(config_.hls.inputFile);
-        inputOpenComplete = true;
-        Logger::info(">>> CEF initialization thread completed");
+    // Thread 1: Load FFmpeg libraries + setup output (fast, ~1-2s)
+    std::thread ffmpegThread([&]() {
+        Logger::info(">>> Starting FFmpeg initialization in parallel...");
+
+        if (!ffmpegWrapper_->loadLibraries(ffmpegLibPath)) {
+            Logger::error("Failed to load FFmpeg libraries");
+            ffmpegReady = true; // Signal completion (even on failure)
+            return;
+        }
+
+        if (!ffmpegWrapper_->setupOutput()) {
+            Logger::error("Failed to setup HLS output");
+            ffmpegReady = true; // Signal completion (even on failure)
+            return;
+        }
+
+        Logger::info(">>> FFmpeg setup complete");
+        ffmpegReady = true; // Signal FFmpeg is ready
     });
 
-    // Meanwhile, initialize FFmpeg in main thread
-    Logger::info(">>> Starting FFmpeg initialization in parallel...");
+    // Thread 2: Wait for FFmpeg, then open CEF input (slow, ~10-15s)
+    std::thread cefThread([&]() {
+        Logger::info(">>> Waiting for FFmpeg to be ready before starting CEF...");
 
-    if (!ffmpegWrapper_->loadLibraries(ffmpegLibPath)) {
-        Logger::error("Failed to load FFmpeg libraries");
-        cefThread.join(); // Wait for CEF thread before returning
-        return false;
-    }
+        // Wait for FFmpeg to complete
+        while (!ffmpegReady) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
 
-    if (!ffmpegWrapper_->setupOutput()) {
-        Logger::error("Failed to setup HLS output");
-        cefThread.join(); // Wait for CEF thread before returning
-        return false;
-    }
+        Logger::info(">>> Starting CEF initialization...");
+        inputOpenSuccess = ffmpegWrapper_->openInput(config_.hls.inputFile);
+        Logger::info(">>> CEF initialization completed");
+    });
 
-    Logger::info(">>> FFmpeg setup complete, waiting for CEF...");
-
-    // Wait for CEF initialization to complete
+    // Wait for both threads to complete
+    ffmpegThread.join();
     cefThread.join();
 
     if (!inputOpenSuccess) {
