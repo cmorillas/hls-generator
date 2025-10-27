@@ -8,6 +8,30 @@
 #include <thread>
 #include <cstring>
 
+// Constants for video/audio processing
+namespace {
+    // Logging intervals
+    constexpr int VIDEO_LOG_INTERVAL_FRAMES = 30;   // Log every 30 frames (1 second at 30fps)
+    constexpr int AUDIO_LOG_INTERVAL_PACKETS = 50;  // Log every 50 audio packets
+
+    // Video encoding constants
+    constexpr int VIDEO_MAX_B_FRAMES = 0;           // No B-frames for low latency encoding
+    constexpr int VIDEO_PACKET_DURATION = 1;        // Duration in timebase units
+
+    // Pixel format constants
+    constexpr int BGRA_BYTES_PER_PIXEL = 4;         // BGRA format: Blue, Green, Red, Alpha
+
+    // Memory alignment
+    constexpr int YUV_FRAME_ALIGNMENT = 32;         // 32-byte alignment for YUV frames (SIMD optimization)
+
+    // Time conversion
+    constexpr int MS_TO_SECONDS_DIVISOR = 1000;     // Milliseconds to seconds conversion
+}
+
+// ============================================================================
+// CONSTRUCTOR & DESTRUCTOR
+// ============================================================================
+
 BrowserInput::BrowserInput(const AppConfig& config, std::shared_ptr<FFmpegContext> ffmpegCtx)
     : ffmpeg_(ffmpegCtx)
     , config_(config)
@@ -32,6 +56,11 @@ BrowserInput::BrowserInput(const AppConfig& config, std::shared_ptr<FFmpegContex
 BrowserInput::~BrowserInput() {
     close();
 }
+
+// ============================================================================
+// LIFECYCLE MANAGEMENT
+// Open, close, and reset encoder lifecycle
+// ============================================================================
 
 bool BrowserInput::open(const std::string& uri) {
     Logger::info("Opening browser input: " + uri);
@@ -131,7 +160,7 @@ bool BrowserInput::readPacket(AVPacket* packet) {
     }
 
     int64_t elapsed_ms = current_time_ms - start_time_ms_;
-    int64_t expected_frame = (elapsed_ms * config_.video.fps) / 1000;
+    int64_t expected_frame = (elapsed_ms * config_.video.fps) / MS_TO_SECONDS_DIVISOR;
 
     bool throttle = frame_count_ >= expected_frame;
 
@@ -194,7 +223,7 @@ bool BrowserInput::readPacket(AVPacket* packet) {
 
     if (frame_count_ == 0) {
         Logger::info("Video started: First video frame generated (frame #0)");
-    } else if (frame_count_ % 30 == 0) {
+    } else if (frame_count_ % VIDEO_LOG_INTERVAL_FRAMES == 0) {
         Logger::info("Video frame #" + std::to_string(frame_count_) +
                    " generated (1 second of video)");
     }
@@ -212,6 +241,11 @@ bool BrowserInput::readPacket(AVPacket* packet) {
     frame_count_++;
     return true;
 }
+
+// ============================================================================
+// STREAMINPUT INTERFACE IMPLEMENTATION
+// Public interface methods required by StreamInput base class
+// ============================================================================
 
 AVFormatContext* BrowserInput::getFormatContext() {
     return format_ctx_.get();
@@ -235,6 +269,11 @@ std::string BrowserInput::getTypeName() const {
     }
     return "Browser";
 }
+
+// ============================================================================
+// VIDEO ENCODING
+// H.264 video encoder setup, BGRA→YUV conversion, and frame encoding
+// ============================================================================
 
 bool BrowserInput::setupEncoder(bool is_reset) {
     if (!is_reset) {
@@ -265,7 +304,7 @@ bool BrowserInput::setupEncoder(bool is_reset) {
     codec_ctx_->pix_fmt = AV_PIX_FMT_YUV420P;
     codec_ctx_->bit_rate = config_.video.bitrate;
     codec_ctx_->gop_size = config_.video.gop_size;
-    codec_ctx_->max_b_frames = 0;
+    codec_ctx_->max_b_frames = VIDEO_MAX_B_FRAMES;  // No B-frames for low latency
 
     ffmpeg_->av_opt_set(codec_ctx_->priv_data, "preset", "ultrafast", 0);
     ffmpeg_->av_opt_set(codec_ctx_->priv_data, "tune", "zerolatency", 0);
@@ -304,7 +343,7 @@ bool BrowserInput::setupEncoder(bool is_reset) {
     yuv_frame_->width = config_.video.width;
     yuv_frame_->height = config_.video.height;
 
-    if (ffmpeg_->av_frame_get_buffer(yuv_frame_.get(), 32) < 0) {
+    if (ffmpeg_->av_frame_get_buffer(yuv_frame_.get(), YUV_FRAME_ALIGNMENT) < 0) {
         Logger::error("Failed to allocate YUV frame buffer");
         return false;
     }
@@ -383,6 +422,11 @@ bool BrowserInput::resetEncoders() {
     Logger::info("Encoders reset complete");
     return true;
 }
+
+// ============================================================================
+// AUDIO ENCODING
+// AAC audio encoder setup, buffering, and packet encoding
+// ============================================================================
 
 bool BrowserInput::setupAudioEncoder(int sample_rate, int channels, bool is_reset) {
     Logger::info("Setting up AAC audio encoder: " + std::to_string(channels) + " channels @ " +
@@ -465,7 +509,7 @@ bool BrowserInput::convertBGRAtoYUVWithCrop(const uint8_t* bgra_data, int src_wi
     }
 
     const uint8_t* src_data[4] = { bgra_data, nullptr, nullptr, nullptr };
-    int src_linesize[4] = { src_width * 4, 0, 0, 0 };
+    int src_linesize[4] = { src_width * BGRA_BYTES_PER_PIXEL, 0, 0, 0 };
 
     int ret = ffmpeg_->sws_scale(
         sws_ctx_.get(),
@@ -511,10 +555,15 @@ bool BrowserInput::encodeFrame(AVFrame* frame, AVPacket* packet) {
     }
 
     packet->stream_index = video_stream_index_;
-    packet->duration = 1;
+    packet->duration = VIDEO_PACKET_DURATION;
 
     return true;
 }
+
+// ============================================================================
+// CEF BROWSER BACKEND MANAGEMENT
+// Frame reception callbacks and CEF initialization
+// ============================================================================
 
 void BrowserInput::onFrameReceived(const uint8_t* bgra_data, int width, int height) {
     if (!bgra_data || width <= 0 || height <= 0) {
@@ -557,7 +606,7 @@ void BrowserInput::onFrameReceived(const uint8_t* bgra_data, int width, int heig
         snapshot_height_ = adjusted_height;
     }
 
-    size_t frame_size = width * height * 4;
+    size_t frame_size = width * height * BGRA_BYTES_PER_PIXEL;
     current_frame_.resize(frame_size);
     std::memcpy(current_frame_.data(), bgra_data, frame_size);
 
@@ -605,7 +654,7 @@ void BrowserInput::pullAudioFromBackend() {
 
         audio_buffer_.insert(audio_buffer_.end(), new_audio.begin(), new_audio.end());
 
-        if (audio_packet_count % 50 == 0) {
+        if (audio_packet_count % AUDIO_LOG_INTERVAL_PACKETS == 0) {
             Logger::info("Audio packet #" + std::to_string(audio_packet_count) +
                        " received, buffer size: " + std::to_string(audio_buffer_.size()) + " samples");
         }
