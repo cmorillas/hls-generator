@@ -26,10 +26,6 @@ namespace {
 
     // Time conversion
     constexpr int MS_TO_SECONDS_DIVISOR = 1000;     // Milliseconds to seconds conversion
-
-    // Loading screen constants
-    constexpr int LOADING_FRAME_Y_VALUE = 64;       // Dark gray in Y (luminance) plane
-    constexpr int LOADING_FRAME_UV_VALUE = 128;     // Neutral in U/V (chrominance) planes
 }
 
 // ============================================================================
@@ -118,49 +114,6 @@ void BrowserInput::close() {
     Logger::info("Browser input closed");
 }
 
-// ============================================================================
-// LOADING SCREEN GENERATION
-// Generates placeholder frames while CEF initializes (without advancing PTS)
-// ============================================================================
-
-bool BrowserInput::generateLoadingFrame(AVPacket* packet) {
-    if (!yuv_frame_) {
-        return false;
-    }
-
-    // Fill Y plane (luminance) with dark gray
-    memset(yuv_frame_->data[0], LOADING_FRAME_Y_VALUE,
-           yuv_frame_->linesize[0] * config_.video.height);
-
-    // Fill U and V planes (chrominance) with neutral color
-    memset(yuv_frame_->data[1], LOADING_FRAME_UV_VALUE,
-           yuv_frame_->linesize[1] * (config_.video.height / 2));
-    memset(yuv_frame_->data[2], LOADING_FRAME_UV_VALUE,
-           yuv_frame_->linesize[2] * (config_.video.height / 2));
-
-    // CRITICAL: PTS = 0 for all loading frames (don't advance timeline)
-    // This ensures when real frames start, they begin at PTS = 0
-    yuv_frame_->pts = 0;
-
-    // Encode frame
-    if (!encodeFrame(yuv_frame_.get(), packet)) {
-        return false;
-    }
-
-    // CRITICAL: DO NOT increment frame_count_ here!
-    // frame_count_ must stay at 0 until first real frame from CEF
-    // This preserves audio/video sync (both start from PTS=0 together)
-
-    static int loading_frame_count = 0;
-    if (loading_frame_count % VIDEO_LOG_INTERVAL_FRAMES == 0) {
-        Logger::info("Loading frame #" + std::to_string(loading_frame_count) +
-                    " (waiting for CEF to initialize...)");
-    }
-    loading_frame_count++;
-
-    return true;
-}
-
 bool BrowserInput::readPacket(AVPacket* packet) {
     if (!initialized_ || !running_) {
         return false;
@@ -198,17 +151,6 @@ bool BrowserInput::readPacket(AVPacket* packet) {
             }
             Logger::info("Page reload handling complete");
         }
-    }
-
-    // Generate loading frames while CEF initializes or page loads
-    // This provides instant HLS output while browser starts up
-    bool cef_page_ready = cef_is_ready && backend_ && backend_->isPageLoaded();
-    bool has_real_frame = received_real_frame_.load();
-
-    if (!cef_page_ready && !has_real_frame) {
-        // CEF not ready yet - generate loading frame with PTS=0
-        // frame_count_ stays at 0 to preserve sync when real frames start
-        return generateLoadingFrame(packet);
     }
 
     bool has_frame = false;

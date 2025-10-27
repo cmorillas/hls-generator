@@ -92,7 +92,6 @@ private:
     bool encodeFrame(AVFrame* frame, AVPacket* packet);
     bool encodeAudio(AVPacket* packet);
     bool hasAudioData() const;
-    bool generateLoadingFrame(AVPacket* packet);
 
     void onFrameReceived(const uint8_t* bgra_data, int width, int height);
     void pullAudioFromBackend();
