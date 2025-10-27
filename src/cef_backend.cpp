@@ -59,6 +59,21 @@ public:
         command_line->AppendSwitch("no-first-run");
         command_line->AppendSwitch("no-default-browser-check");
 
+        // Additional startup optimizations
+        command_line->AppendSwitch("disable-sync");
+        command_line->AppendSwitch("disable-domain-reliability");
+        command_line->AppendSwitch("disable-breakpad");
+        command_line->AppendSwitch("metrics-recording-only");
+        command_line->AppendSwitch("disable-client-side-phishing-detection");
+        command_line->AppendSwitch("disable-notifications");
+        command_line->AppendSwitch("disable-speech-api");
+        command_line->AppendSwitch("disable-geolocation");
+        command_line->AppendSwitch("disable-sensors");
+
+        // Minimal cache sizes (1MB each)
+        command_line->AppendSwitchWithValue("disk-cache-size", "1048576");
+        command_line->AppendSwitchWithValue("media-cache-size", "1048576");
+
         // Audio/Video: Critical for YouTube autoplay
         command_line->AppendSwitchWithValue("autoplay-policy", "no-user-gesture-required");
         command_line->AppendSwitchWithValue("disable-features", "HardwareMediaKeyHandling,WebBluetooth");
