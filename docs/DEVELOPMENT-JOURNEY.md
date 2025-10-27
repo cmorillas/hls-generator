@@ -7805,3 +7805,428 @@ grep -A5 "struct HLSConfig" src/config.h
 
 ---
 
+
+## v1.5.1 - Code Quality & CEF Optimizations (2025-01-XX)
+
+### Objetivo: Mejorar rendimiento y legibilidad sin romper sincronización A/V
+
+Después de v1.5.0, el código funcionaba perfectamente pero había oportunidades de mejora:
+1. Código legible pero con magic numbers
+2. CEF tardaba 10-15s en inicializar
+3. No había feedback visual durante la carga inicial
+
+### Mejora 1: Refactoring de browser_input.cpp - Análisis y Decisión
+
+**Pregunta inicial**: ¿Debemos dividir browser_input.cpp (711 líneas) en clases separadas?
+
+**Opciones consideradas**:
+- Extraer `VideoEncoder` class (encodeFrame + setup)
+- Extraer `AudioEncoder` class (encodeAudio + setup)
+- Extraer `PTSManager` class (frame_count_, audio_samples_written_)
+- Dividir en múltiples archivos .cpp
+
+**Análisis realizado**:
+```cpp
+// Código crítico que NO se puede romper:
+
+// Video PTS - SIEMPRE monotónico desde 0
+yuv_frame_->pts = frame_count_;  // Line 222
+frame_count_++;  // Line 241 - Solo con frames REALES
+
+// Audio PTS - SIEMPRE monotónico desde 0
+audio_frame_->pts = audio_samples_written_;  // Line 638
+audio_samples_written_ += audio_codec_ctx_->frame_size;
+
+// Clock initialization - UNA SOLA VEZ
+if (start_time_ms_ == 0) {  // Lines 209-217
+    start_time_ms_ = current_time_ms;
+}
+```
+
+**Riesgos identificados**:
+- PTS synchronization está entrelazada con lógica de encoding
+- Si separamos en clases, necesitamos compartir estado (frame_count_, audio_samples_written_)
+- Shared state = más complejidad = más bugs potenciales
+- El código funciona perfecto ahora después de MESES de debugging
+
+**Decisión final**: **NO REFACTORIZAR**
+- Razón 1: YAGNI principle (You Ain't Gonna Need It)
+- Razón 2: 711 líneas es totalmente manejable
+- Razón 3: Alto riesgo de romper sincronización A/V
+- Razón 4: No hay bug que arreglar, no hay feature que añadir
+
+**Alternativa aplicada**: Mejorar legibilidad in-place
+- ✅ Añadir section comments
+- ✅ Extraer magic numbers a constantes
+
+### Mejora 2: Extracción de Constantes (Commit b91fb7f)
+
+**Antes**:
+```cpp
+// Magic numbers hardcoded
+if (frame_count_ % 30 == 0) {  // ¿Por qué 30?
+    std::cout << "Encoded frame " << frame_count_;
+}
+
+int yuv_buffer_size = av_image_get_buffer_size(
+    target_pixel_format, width, height, 32  // ¿Por qué 32?
+);
+
+uint8_t* bgra_line = bgra_data + y * (width * 4);  // ¿Por qué 4?
+```
+
+**Después**:
+```cpp
+namespace {
+    constexpr int VIDEO_LOG_INTERVAL_FRAMES = 30;
+    constexpr int AUDIO_LOG_INTERVAL_PACKETS = 50;
+    constexpr int VIDEO_MAX_B_FRAMES = 0;
+    constexpr int VIDEO_PACKET_DURATION = 1;
+    constexpr int BGRA_BYTES_PER_PIXEL = 4;
+    constexpr int YUV_FRAME_ALIGNMENT = 32;
+    constexpr int MS_TO_SECONDS_DIVISOR = 1000;
+}
+
+if (frame_count_ % VIDEO_LOG_INTERVAL_FRAMES == 0) {
+    std::cout << "Encoded frame " << frame_count_;
+}
+
+int yuv_buffer_size = av_image_get_buffer_size(
+    target_pixel_format, width, height, YUV_FRAME_ALIGNMENT
+);
+
+uint8_t* bgra_line = bgra_data + y * (width * BGRA_BYTES_PER_PIXEL);
+```
+
+**Section comments añadidos**:
+```cpp
+// =================================================================
+// SECTION 1: INITIALIZATION AND SETUP
+// =================================================================
+
+// =================================================================
+// SECTION 2: COLORSPACE CONVERSION (BGRA -> YUV420p)
+// =================================================================
+
+// =================================================================
+// SECTION 3: VIDEO ENCODING
+// =================================================================
+
+// =================================================================
+// SECTION 4: AUDIO ENCODING
+// =================================================================
+
+// =================================================================
+// SECTION 5: CLEANUP AND DESTRUCTION
+// =================================================================
+
+// =================================================================
+// SECTION 6: CODEC CONTEXT SETUP
+// =================================================================
+```
+
+**Resultado**: Código más legible, misma funcionalidad, cero riesgo.
+
+### Mejora 3: Loading Frames - INTENTO FALLIDO (Commits e55bca5 + 729a77b)
+
+**Objetivo**: Mostrar algo en pantalla mientras CEF inicializa (10-15s)
+
+**Idea inicial**: Generar frames oscuros con texto "Loading..." antes de CEF
+
+**Implementación**:
+```cpp
+// Añadido a browser_input.cpp
+void BrowserInput::generateLoadingFrame() {
+    // Generate dark gray YUV frame
+    std::memset(yuv_buffer_, LOADING_FRAME_Y_VALUE, y_size);  // Y = 64 (dark gray)
+    std::memset(yuv_buffer_ + y_size, LOADING_FRAME_UV_VALUE, uv_size);  // U
+    std::memset(yuv_buffer_ + y_size + uv_size, LOADING_FRAME_UV_VALUE, uv_size);  // V
+
+    yuv_frame_->pts = 0;  // ¡ERROR! Pensamos que PTS=0 no avanzaría DTS
+
+    encodeFrame();  // Encode and send to muxer
+}
+
+// En hls_generator.cpp:
+while (!cef_initialized) {
+    browser_input->generateLoadingFrame();  // 2220 frames = 74 seconds @ 30fps
+    std::this_thread::sleep_for(std::chrono::milliseconds(33));
+}
+```
+
+**Resultado**: ❌ **FALLO CATASTRÓFICO**
+
+**Error obtenido**:
+```
+[mpegts @ ...] Application provided invalid, non monotonically increasing
+dts to muxer in stream 0: 2090 >= 2090
+```
+
+**¿Por qué falló?**
+
+```
+Timeline incorrecta:
+
+Loading phase (74 segundos):
+Frame 0:    PTS=0, DTS=0   ← Muxer acepta
+Frame 1:    PTS=0, DTS=1   ← Muxer acepta
+Frame 2:    PTS=0, DTS=2   ← Muxer acepta
+...
+Frame 2220: PTS=0, DTS=2090 ← Muxer acepta
+
+Real content starts:
+Frame 2221: PTS=0, DTS=0   ← ¡RECHAZADO! (0 < 2090)
+```
+
+**Descubrimiento crítico**: **El HLS muxer es STATEFUL**
+```cpp
+// Dentro del muxer MPEG-TS (FFmpeg interno):
+struct MuxerState {
+    int64_t last_dts = -1;  // State persistente
+
+    int write_packet(AVPacket* pkt) {
+        if (pkt->dts <= last_dts) {
+            return AVERROR(EINVAL);  // ¡Error!
+        }
+        last_dts = pkt->dts;  // Update state
+    }
+};
+```
+
+**Por qué es imposible resetear**:
+1. El muxer MPEG-TS trackea DTS internamente
+2. No hay API para "resetear" el muxer mid-stream
+3. Cada packet incrementa el DTS counter interno
+4. No se puede "volver atrás" en el tiempo
+5. PTS del frame es INDEPENDIENTE del DTS que calcula el muxer
+
+**Intentos de fix considerados**:
+
+❌ **Opción 1**: Delay muxer setup hasta después de CEF
+- Ya lo hacemos: `avformat_write_header()` solo se llama cuando CEF ready
+- No funciona: `encodeFrame()` llama `av_interleaved_write_frame()` que avanza DTS
+
+❌ **Opción 2**: No enviar loading frames al muxer, solo mostrar
+- Imposible: No tenemos display separado, solo generamos HLS output
+- No hay "pantalla" donde mostrar frames sin muxer
+
+❌ **Opción 3**: Pre-render loading.mp4 y concatenar
+- Demasiado complejo: Requiere 2-phase muxing
+- Problema: Mismos issues con DTS al concatenar
+
+❌ **Opción 4**: Resetear todo el pipeline después de loading
+- Imposible: Tendríamos que recrear muxer, output context, codec contexts
+- Demasiado riesgo de memory leaks y bugs
+
+❌ **Opción 5**: Usar PTS negativos para loading frames
+- Inválido: MPEG-TS no acepta timestamps negativos
+
+**Conclusión**: **IMPOSIBLE sin cambios arquitectónicos mayores**
+
+**Mismo problema que**: SMPTE bars en v1.5.0
+- Intentamos enviar test pattern antes de content real
+- Falló por la misma razón: DTS non-monotonic
+- Historia se repite: No aprendimos la lección
+
+**Decisión**: Revert commit e55bca5 (commit 729a77b)
+```bash
+git revert e55bca5
+# Removed generateLoadingFrame() entirely
+# Removed loading constants
+# Back to working state
+```
+
+### Lección Aprendida: Restricciones del HLS Muxer
+
+**Regla fundamental**:
+```
+Once you start writing packets to an HLS muxer,
+you CANNOT reset the timeline. DTS must ALWAYS increase.
+```
+
+**Implicaciones**:
+1. ❌ No loading frames antes de content real
+2. ❌ No SMPTE bars antes de content real
+3. ❌ No test patterns antes de content real
+4. ❌ No "splash screen" antes de content real
+5. ✅ Solo esperar a que CEF inicialice
+6. ✅ Solo mejorar logs en consola
+
+**Alternativas viables** (si fuera necesario en futuro):
+- Pre-inicializar CEF en background antes de main()
+- Usar static HTML page antes de iniciar HLS stream
+- Mostrar mensaje en consola con progress bar ASCII
+- Usar headless Chrome en vez de CEF (startup más rápido)
+
+**NO viable**:
+- Cualquier cosa que requiera enviar frames al muxer antes del content real
+
+### Mejora 4: CEF Startup Optimization (Commit 4af6ea2)
+
+**Objetivo**: Reducir 10-15s de inicialización CEF
+
+**Estrategia**: Deshabilitar servicios innecesarios de Chromium
+
+**Flags añadidos** (src/cef_backend.cpp):
+```cpp
+// Disable unnecessary services
+command_line->AppendSwitch("disable-sync");  // No Chrome sync
+command_line->AppendSwitch("disable-domain-reliability");  // No telemetry
+command_line->AppendSwitch("disable-breakpad");  // No crash reporter
+command_line->AppendSwitch("metrics-recording-only");  // Metrics without network
+command_line->AppendSwitch("disable-client-side-phishing-detection");
+
+// Disable unused APIs
+command_line->AppendSwitch("disable-notifications");
+command_line->AppendSwitch("disable-speech-api");
+command_line->AppendSwitch("disable-geolocation");
+command_line->AppendSwitch("disable-sensors");
+
+// Minimal cache sizes (1MB each)
+command_line->AppendSwitchWithValue("disk-cache-size", "1048576");
+command_line->AppendSwitchWithValue("media-cache-size", "1048576");
+```
+
+**Flags considerados pero NO añadidos** (UNSAFE):
+```cpp
+// ❌ Rompen funcionalidad o seguridad
+"no-sandbox"  // Security risk
+"single-process"  // Unstable crashes
+"disable-webgl"  // YouTube puede necesitarlo
+"disable-local-storage"  // Sites dependen de esto
+"disable-webrtc"  // Streaming puede usarlo
+"disable-javascript"  // Obvio: todo se rompe
+```
+
+**Resultado**: Mejora marginal (~1-2s menos)
+- CEF startup inherentemente lento (Chromium es pesado)
+- Page load time no se puede optimizar (network + rendering)
+- Total sigue siendo ~10-15s
+
+**Conclusión**: Flags ayudan pero no son mágicos
+
+### Análisis de Bottlenecks: Por qué 15-20s de latencia
+
+**Timeline completa de inicio**:
+```
+T+0s:     Ejecutar ./hls-generator browser://URL output/
+T+0.1s:   Inicializar FFmpeg contexts (rápido)
+T+0.2s:   Setup video/audio codecs (rápido)
+T+0.3s:   Iniciar CEF en background thread
+          └─> CefInitialize() comienza...
+
+T+0.3s → T+10s:  CEF INITIALIZATION (BOTTLENECK #1)
+                 - Load CEF library
+                 - Initialize Chromium subsystems
+                 - Create browser context
+                 - Setup GPU process
+                 - Initialize V8 JavaScript engine
+
+T+10s:    CEF initialized, load URL
+T+10s → T+15s:   PAGE LOAD (BOTTLENECK #2)
+                 - DNS lookup
+                 - HTTP request
+                 - Download HTML/CSS/JS
+                 - Parse and execute JavaScript
+                 - Render first frame
+
+T+15s:    First frame ready, start encoding
+T+15s → T+19s:   HLS BUFFERING (optimizado en v1.4.1)
+                 - Generate 2s segments
+                 - Write 3 segments to playlist
+                 - Player loads playlist
+
+T+19s:    PLAYBACK STARTS
+```
+
+**Bottlenecks identificados**:
+1. **CEF init (10s)**: 50% del tiempo total
+   - Inherente a Chromium
+   - No optimizable sin pre-init architecture
+
+2. **Page load (5s)**: 25% del tiempo total
+   - Depends on network
+   - Depends on page complexity
+   - No optimizable desde nuestro lado
+
+3. **HLS buffering (4s)**: 20% del tiempo total
+   - Ya optimizado en v1.4.1 (2s segments, 3 playlist)
+   - No podemos bajar más sin romper compatibilidad
+
+4. **Encoding setup (0.5s)**: 2.5% del tiempo total
+   - Insignificante, ya optimizado
+
+**Optimizaciones posibles** (futuro, no urgente):
+```cpp
+// Opción 1: Pre-init CEF (major refactor)
+int main() {
+    CefInitialize();  // Antes de parsear args
+    // Luego crear browser
+}
+// Ahorra: ~8s (CEF init mientras usuario escribe comando)
+
+// Opción 2: Persistent CEF process (daemon)
+// Start once, reuse for multiple captures
+// Ahorra: ~10s en capturas subsecuentes
+
+// Opción 3: Headless Chrome en vez de CEF
+// system("google-chrome --headless --remote-debugging-port=9222");
+// Startup más rápido que CEF (~5s vs ~10s)
+```
+
+**Optimizaciones NO posibles**:
+- ❌ Loading frames (DTS monotonicity)
+- ❌ SMPTE bars (DTS monotonicity)
+- ❌ Skip buffering (player requirements)
+- ❌ Faster page load (network/site control)
+
+### Resumen v1.5.1
+
+**Commits realizados**:
+1. `b91fb7f` - refactor: improve browser_input.cpp readability ✅
+2. `e55bca5` - feat: add instant loading frames ❌ (FAILED)
+3. `729a77b` - Revert "feat: add instant loading frames" ✅
+4. `4af6ea2` - perf: add 11 CEF startup optimization flags ✅
+
+**Cambios que funcionaron**:
+- ✅ 8 constantes extraídas (magic numbers → named constants)
+- ✅ 6 section comments añadidos
+- ✅ 11 CEF optimization flags
+- ✅ Código más legible sin cambiar comportamiento
+- ✅ Compilación limpia sin warnings
+
+**Cambios que fallaron**:
+- ❌ Loading frames (DTS non-monotonic error)
+- ❌ Intentar "engañar" al muxer con PTS=0
+- ❌ Resetear timeline mid-stream
+
+**Lecciones críticas aprendidas**:
+
+1. **No refactorizar código que funciona perfecto**
+   - YAGNI principle es real
+   - Sincronización A/V es frágil
+   - 711 líneas es totalmente manejable
+
+2. **El muxer HLS es STATEFUL y no se puede resetear**
+   - DTS debe ser SIEMPRE monotónicamente creciente
+   - No se puede enviar packets "before" real content
+   - Mismo problema que SMPTE bars
+
+3. **CEF initialization es inherentemente lenta**
+   - No hay flags mágicos
+   - Solo arquitectura diferente puede mejorarlo (pre-init, daemon, headless Chrome)
+
+4. **Mejorar legibilidad es siempre seguro**
+   - Section comments: bajo riesgo, alta utilidad
+   - Named constants: bajo riesgo, alta legibilidad
+   - Refactoring estructural: alto riesgo, utilidad cuestionable
+
+**Estado final**: Código funcional, legible, con optimizaciones CEF marginales.
+
+**Archivos modificados**:
+- [src/browser_input.cpp](../src/browser_input.cpp) - Section comments + constants
+- [src/cef_backend.cpp](../src/cef_backend.cpp) - 11 optimization flags
+
+**Binary size**: 2.3 MB (Windows), 1.6 MB (Linux)
+
+**Versión**: v1.5.1 - CEF Startup Optimizations
