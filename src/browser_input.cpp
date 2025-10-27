@@ -15,6 +15,7 @@ BrowserInput::BrowserInput(const AppConfig& config, std::shared_ptr<FFmpegContex
     , audio_stream_index_(-1)
     , frame_ready_(false)
     , resetting_encoders_(false)
+    , received_real_frame_(false)
     , frame_count_(0)
     , start_time_ms_(0)
     , snapshot_width_(0)
@@ -34,49 +35,15 @@ BrowserInput::~BrowserInput() {
 
 bool BrowserInput::open(const std::string& uri) {
     Logger::info("Opening browser input: " + uri);
-
-    if (!BrowserBackendFactory::isAvailable()) {
-        Logger::error("No OBS browser backend detected");
-        Logger::error("Please install OBS Studio with the Browser Source (CEF) module enabled.");
-        return false;
-    }
-
-    backend_ = std::unique_ptr<BrowserBackend>(BrowserBackendFactory::create());
-    if (!backend_) {
-        Logger::error("Failed to create browser backend");
-        return false;
-    }
-
-    Logger::info("Using browser backend: " + std::string(backend_->getName()));
     Logger::info("Browser resolution: " + std::to_string(config_.video.width) + "x" + std::to_string(config_.video.height) + " @ " + std::to_string(config_.video.fps) + "fps");
 
-    backend_->setViewportSize(config_.video.width, config_.video.height);
-    backend_->setFrameCallback([this](const uint8_t* data, int width, int height) {
-        this->onFrameReceived(data, width, height);
-    });
+    // Store URI for CEF initialization
+    pending_uri_ = uri;
 
-    // Configure JavaScript injection (if CEF backend)
-    CEFBackend* cef_backend = dynamic_cast<CEFBackend*>(backend_.get());
-    if (cef_backend) {
-        cef_backend->setJsInjectionEnabled(config_.browser.enableJsInjection);
-        if (!config_.browser.enableJsInjection) {
-            Logger::info("JavaScript injection disabled (--no-js flag)");
-        }
-    }
-
-    if (!backend_->loadURL(uri)) {
-        Logger::error("Failed to load URL in browser");
-        return false;
-    }
-
+    // Setup encoders immediately (fast, synchronous)
     if (!setupEncoder()) {
         Logger::error("Failed to setup video encoder");
         return false;
-    }
-
-    // Create SMPTE test bars placeholder (non-critical, continue if fails)
-    if (!createSMPTEFrame()) {
-        Logger::warn("Failed to create SMPTE placeholder frame - will skip placeholders");
     }
 
     if (!setupAudioEncoder(config_.audio.sample_rate, config_.audio.channels)) {
@@ -89,7 +56,9 @@ bool BrowserInput::open(const std::string& uri) {
     running_ = true;
     start_time_ms_ = 0;
 
-    Logger::info("Browser input opened successfully (waiting for first audio to start video clock)");
+    // Initialize CEF immediately
+    Logger::info("Browser input opened - initializing CEF directly");
+    tryInitializeCEF();
     return true;
 }
 
@@ -121,90 +90,72 @@ bool BrowserInput::readPacket(AVPacket* packet) {
         return false;
     }
 
-    backend_->processEvents();
-    pullAudioFromBackend();
-
-    CEFBackend* cef = dynamic_cast<CEFBackend*>(backend_.get());
-    if (cef && cef->hasLoadError()) {
-        Logger::error("Browser failed to load page - stopping");
-        return false;
-    }
-
-    if (cef && cef->checkAndClearPageReload()) {
-        Logger::info(">>> PAGE RELOAD DETECTED: Resetting muxer and encoders");
-        if (pageReloadCallback_ && !pageReloadCallback_()) {
-            Logger::error("Failed to reset output muxer on page reload");
-            return false;
-        }
-        if (!resetEncoders()) {
-            Logger::error("Failed to reset encoders on page reload");
-            return false;
-        }
-        Logger::info(">>> PAGE RELOAD HANDLING COMPLETE");
-    }
-
-    if (!backend_->isPageLoaded()) {
-        // Generate SMPTE test bars while CEF loads page
-        if (smpte_frame_) {
-            // Initialize timing on first frame
-            if (start_time_ms_ == 0) {
-                start_time_ms_ = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::system_clock::now().time_since_epoch()).count();
-                Logger::info(">>> SMPTE placeholder: Starting test bars generation while page loads...");
-            }
-
-            // Encode SMPTE frame
-            if (encodeFrame(smpte_frame_.get(), packet)) {
-                frame_count_++;
-                if (frame_count_ == 1) {
-                    Logger::info(">>> SMPTE placeholder: First test bar frame encoded");
-                } else if (frame_count_ % 30 == 0) {
-                    Logger::info(">>> SMPTE placeholder: Still loading page... (" + std::to_string(frame_count_/30) + "s)");
-                }
-                return true;
-            }
-        }
-
-        // Fallback: wait without generating frames
-        std::this_thread::sleep_for(std::chrono::milliseconds(16)); // ~60fps timing
-        return true;
-    }
-
-    // Page loaded - transition to real frames
-    if (smpte_frame_ && frame_count_ > 0) {
-        Logger::info(">>> SMPTE placeholder: Page loaded! Transitioning to real video content...");
-        smpte_frame_.reset(); // Free SMPTE frame (no longer needed)
-    }
-
-    pullAudioFromBackend();
-
     int64_t current_time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
-    int64_t elapsed_ms = current_time_ms - start_time_ms_;
-    int64_t expected_frame = (elapsed_ms * config_.video.fps) / 1000;
 
-    if (frame_count_ >= expected_frame) {
-        if (audio_codec_ctx_ && hasAudioData() && encodeAudio(packet)) {
-            return true;
-        }
-        // Reduced sleep to minimize jitter (1ms instead of 5ms)
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        return true;
+    // Initialize timing on first call
+    if (start_time_ms_ == 0) {
+        start_time_ms_ = current_time_ms;
     }
 
-    if (audio_codec_ctx_ && hasAudioData() && encodeAudio(packet)) {
-        return true;
+    // Process CEF backend events and frames
+    bool cef_is_ready = cef_initialized_.load();
+    if (cef_is_ready && backend_) {
+        backend_->processEvents();
+        pullAudioFromBackend();
+
+        CEFBackend* cef = dynamic_cast<CEFBackend*>(backend_.get());
+        if (cef && cef->hasLoadError()) {
+            Logger::error("Browser failed to load page - stopping");
+            return false;
+        }
+
+        if (cef && cef->checkAndClearPageReload()) {
+            Logger::info("Page reload detected - resetting muxer and encoders");
+            if (pageReloadCallback_ && !pageReloadCallback_()) {
+                Logger::error("Failed to reset output muxer on page reload");
+                return false;
+            }
+            if (!resetEncoders()) {
+                Logger::error("Failed to reset encoders on page reload");
+                return false;
+            }
+            Logger::info("Page reload handling complete");
+        }
     }
 
     bool has_frame = false;
-    {
+    if (cef_is_ready) {
         std::lock_guard<std::mutex> lock(frame_mutex_);
         has_frame = frame_ready_ && !current_frame_.empty();
     }
 
+    int64_t elapsed_ms = current_time_ms - start_time_ms_;
+    int64_t expected_frame = (elapsed_ms * config_.video.fps) / 1000;
+
+    bool throttle = frame_count_ >= expected_frame;
+
+    if (throttle) {
+        // Try to emit audio while we wait for the next video frame
+        if (audio_codec_ctx_ && hasAudioData() && encodeAudio(packet)) {
+            return true;
+        }
+        if (!has_frame) {
+            // No fresh video frame yet – yield briefly and try again
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            return true;
+        }
+        // Otherwise fall through to process the available video frame
+    } else if (audio_codec_ctx_ && hasAudioData() && encodeAudio(packet)) {
+        return true;
+    }
+
     if (!has_frame) {
-        if (cef && backend_->isPageLoaded()) {
-            cef->invalidate();
+        if (cef_is_ready && backend_) {
+            CEFBackend* cef = dynamic_cast<CEFBackend*>(backend_.get());
+            if (cef && backend_->isPageLoaded()) {
+                cef->invalidate();
+            }
         }
         // Reduced sleep to minimize frame drops (2ms instead of 10ms)
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -230,9 +181,9 @@ bool BrowserInput::readPacket(AVPacket* packet) {
         start_time_ms_ = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
         if (frame_count_ == 0) {
-            Logger::info(">>> VIDEO & AUDIO CLOCK STARTED: First video frame being generated");
+            Logger::info("Video & audio clock started: First video frame being generated");
         } else {
-            Logger::info(">>> VIDEO & AUDIO CLOCK RESTARTED: After page reload (video frame #" + std::to_string(frame_count_) + ", audio samples #" + std::to_string(audio_samples_written_) + ")");
+            Logger::info("Video & audio clock restarted after page reload (video frame #" + std::to_string(frame_count_) + ", audio samples #" + std::to_string(audio_samples_written_) + ")");
         }
     }
 
@@ -242,7 +193,7 @@ bool BrowserInput::readPacket(AVPacket* packet) {
     yuv_frame_->pts = frame_count_;
 
     if (frame_count_ == 0) {
-        Logger::info(">>> VIDEO STARTED: First video frame generated (frame #0)");
+        Logger::info("Video started: First video frame generated (frame #0)");
     } else if (frame_count_ % 30 == 0) {
         Logger::info("Video frame #" + std::to_string(frame_count_) +
                    " generated (1 second of video)");
@@ -250,6 +201,12 @@ bool BrowserInput::readPacket(AVPacket* packet) {
 
     if (!encodeFrame(yuv_frame_.get(), packet)) {
         return false;
+    }
+
+    // Mark that we successfully encoded the first real frame
+    if (!received_real_frame_.load()) {
+        received_real_frame_ = true;
+        Logger::info("First real video frame encoded successfully");
     }
 
     frame_count_++;
@@ -374,7 +331,7 @@ bool BrowserInput::resetEncoders() {
     std::lock_guard<std::mutex> lock(encoder_mutex_);
     resetting_encoders_ = true;
 
-    Logger::info(">>> RESETTING ENCODERS: Recreating video and audio encoders (keeping CEF alive)");
+    Logger::info("Resetting encoders: Recreating video and audio encoders (keeping CEF alive)");
 
     if (codec_ctx_) {
         AVPacket* temp_pkt = ffmpeg_->av_packet_alloc();
@@ -384,7 +341,7 @@ bool BrowserInput::resetEncoders() {
         }
         ffmpeg_->av_packet_free(&temp_pkt);
         codec_ctx_.reset();
-        Logger::info(">>> Flushed and freed old video encoder");
+        Logger::info("Flushed and freed old video encoder");
     }
 
     if (audio_codec_ctx_) {
@@ -395,7 +352,7 @@ bool BrowserInput::resetEncoders() {
         }
         ffmpeg_->av_packet_free(&temp_pkt);
         audio_codec_ctx_.reset();
-        Logger::info(">>> Flushed and freed old audio encoder");
+        Logger::info("Flushed and freed old audio encoder");
     }
 
     if (!setupEncoder(true)) {
@@ -403,7 +360,7 @@ bool BrowserInput::resetEncoders() {
         resetting_encoders_ = false;
         return false;
     }
-    Logger::info(">>> Video encoder recreated");
+    Logger::info("Video encoder recreated");
 
     if (audio_sample_rate_ > 0 && audio_channels_ > 0) {
         if (!setupAudioEncoder(audio_sample_rate_, audio_channels_, true)) {
@@ -411,7 +368,7 @@ bool BrowserInput::resetEncoders() {
             resetting_encoders_ = false;
             return false;
         }
-        Logger::info(">>> Audio encoder recreated");
+        Logger::info("Audio encoder recreated");
     }
 
     frame_count_ = 0;
@@ -419,10 +376,11 @@ bool BrowserInput::resetEncoders() {
     start_time_ms_ = 0;
     audio_start_pts_ = -1;
     audio_buffer_.clear();
-    Logger::info(">>> Reset PTS counters and cleared audio buffer");
+    received_real_frame_ = false;  // Reset frame tracking after page reload
+    Logger::info("Reset PTS counters, cleared audio buffer, and reset frame tracking");
 
     resetting_encoders_ = false;
-    Logger::info(">>> ENCODERS RESET COMPLETE");
+    Logger::info("Encoders reset complete");
     return true;
 }
 
@@ -545,6 +503,7 @@ bool BrowserInput::encodeFrame(AVFrame* frame, AVPacket* packet) {
 
     ret = ffmpeg_->avcodec_receive_packet(codec_ctx_.get(), packet);
     if (ret == AVERROR(EAGAIN)) {
+        // Encoder needs more frames before producing a packet; caller can retry next iteration
         return true;
     } else if (ret < 0) {
         Logger::error("Failed to receive packet from encoder");
@@ -632,7 +591,7 @@ void BrowserInput::pullAudioFromBackend() {
         if (start_time_ms_ == 0) {
             static bool logged_discard = false;
             if (!logged_discard) {
-                Logger::info(">>> DISCARDING pre-page-load audio (packet #" + std::to_string(audio_packet_count) +
+                Logger::info("Discarding pre-page-load audio (packet #" + std::to_string(audio_packet_count) +
                            ") - waiting for page to load and first video frame");
                 logged_discard = true;
             }
@@ -641,7 +600,7 @@ void BrowserInput::pullAudioFromBackend() {
 
         if (audio_start_pts_ < 0 && audio_sample_rate_ > 0) {
             audio_start_pts_ = 0;
-            Logger::info(">>> First audio after video start - audio PTS starts from 0");
+            Logger::info("First audio after video start - audio PTS starts from 0");
         }
 
         audio_buffer_.insert(audio_buffer_.end(), new_audio.begin(), new_audio.end());
@@ -703,66 +662,50 @@ bool BrowserInput::hasAudioData() const {
     return !audio_buffer_.empty();
 }
 
-void BrowserInput::fillSMPTEBars(AVFrame* frame) {
-    int width = frame->width;   // 1280
-    int height = frame->height; // 720
-    int bar_width = width / 7;
+void BrowserInput::tryInitializeCEF() {
+    if (cef_initialized_.load() || pending_uri_.empty()) {
+        return; // Already initialized or no URI
+    }
 
-    // 7 SMPTE color bars: White, Yellow, Cyan, Green, Magenta, Red, Blue
-    struct YUV {
-        uint8_t y, u, v;
-    };
+    Logger::info("Initializing CEF browser backend...");
 
-    YUV colors[7] = {
-        {235, 128, 128}, // White
-        {210,  16, 146}, // Yellow
-        {170, 166,  16}, // Cyan
-        {145,  54,  34}, // Green
-        {106, 202, 222}, // Magenta
-        { 81,  90, 240}, // Red
-        { 41, 240, 110}  // Azul
-    };
+    if (!BrowserBackendFactory::isAvailable()) {
+        Logger::error("No OBS browser backend detected");
+        Logger::error("Please install OBS Studio with the Browser Source (CEF) module enabled.");
+        cef_initialized_ = true; // Mark as "done" to avoid retrying
+        return;
+    }
 
-    // Fill Y plane (luminance) - full resolution
-    for (int y = 0; y < height; y++) {
-        for (int x = 0; x < width; x++) {
-            int bar_index = (x / bar_width) % 7;
-            frame->data[0][y * frame->linesize[0] + x] = colors[bar_index].y;
+    backend_ = std::unique_ptr<BrowserBackend>(BrowserBackendFactory::create());
+    if (!backend_) {
+        Logger::error("Failed to create browser backend");
+        cef_initialized_ = true;
+        return;
+    }
+
+    Logger::info("Using browser backend: " + std::string(backend_->getName()));
+
+    backend_->setViewportSize(config_.video.width, config_.video.height);
+    backend_->setFrameCallback([this](const uint8_t* data, int width, int height) {
+        this->onFrameReceived(data, width, height);
+    });
+
+    // Configure JavaScript injection (if CEF backend)
+    CEFBackend* cef_backend = dynamic_cast<CEFBackend*>(backend_.get());
+    if (cef_backend) {
+        cef_backend->setJsInjectionEnabled(config_.browser.enableJsInjection);
+        if (!config_.browser.enableJsInjection) {
+            Logger::info("JavaScript injection disabled (--no-js flag)");
         }
     }
 
-    // Fill U and V planes (chrominance) - subsampled (YUV420)
-    for (int y = 0; y < height/2; y++) {
-        for (int x = 0; x < width/2; x++) {
-            int bar_index = ((x*2) / bar_width) % 7;
-            frame->data[1][y * frame->linesize[1] + x] = colors[bar_index].u;
-            frame->data[2][y * frame->linesize[2] + x] = colors[bar_index].v;
-        }
-    }
-}
-
-bool BrowserInput::createSMPTEFrame() {
-    AVFrame* frame = ffmpeg_->av_frame_alloc();
-    if (!frame) {
-        Logger::warn("Failed to allocate SMPTE frame");
-        return false;
+    Logger::info("Loading URL: " + pending_uri_);
+    if (!backend_->loadURL(pending_uri_)) {
+        Logger::error("Failed to load URL in browser");
+        cef_initialized_ = true;
+        return;
     }
 
-    frame->format = AV_PIX_FMT_YUV420P;
-    frame->width = config_.video.width;
-    frame->height = config_.video.height;
-
-    if (ffmpeg_->av_frame_get_buffer(frame, 0) < 0) {
-        ffmpeg_->av_frame_free(&frame);
-        Logger::warn("Failed to get buffer for SMPTE frame");
-        return false;
-    }
-
-    fillSMPTEBars(frame);
-
-    smpte_frame_ = std::unique_ptr<AVFrame, AVFrameDeleter>(
-        frame, AVFrameDeleter(ffmpeg_));
-
-    Logger::info("SMPTE test bars placeholder created");
-    return true;
+    cef_initialized_ = true;
+    Logger::info("CEF initialized successfully");
 }

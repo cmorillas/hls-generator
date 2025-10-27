@@ -44,23 +44,24 @@ public:
     void OnBeforeCommandLineProcessing(
         const CefString& process_type,
         CefRefPtr<CefCommandLine> command_line) override {
-        // REMOVED: single-process mode (now using multi-process like OBS)
-        // command_line->AppendSwitch("single-process");
-
-        // OBS command-line switches (exact match)
-        command_line->AppendSwitch("disable-gpu-compositing");
-        command_line->AppendSwitchWithValue("disable-features", "HardwareMediaKeyHandling,WebBluetooth");
-        command_line->AppendSwitchWithValue("autoplay-policy", "no-user-gesture-required");
-
-        // Performance optimizations (conservative profile)
+        // Performance optimizations: Disable GPU rendering (use software rasterizer)
         command_line->AppendSwitch("disable-gpu");
         // NOTE: DO NOT disable-software-rasterizer - CEF needs it when GPU is disabled
-        command_line->AppendSwitch("no-proxy-server");
+
+        // Startup acceleration: Disable unnecessary components
         command_line->AppendSwitch("disable-extensions");
         command_line->AppendSwitch("disable-plugins");
+        command_line->AppendSwitch("disable-component-update");
         command_line->AppendSwitch("disable-background-networking");
+        command_line->AppendSwitch("disable-pdf-extension");
+        command_line->AppendSwitch("disable-hang-monitor");
+        command_line->AppendSwitch("no-proxy-server");
         command_line->AppendSwitch("no-first-run");
         command_line->AppendSwitch("no-default-browser-check");
+
+        // Audio/Video: Critical for YouTube autoplay
+        command_line->AppendSwitchWithValue("autoplay-policy", "no-user-gesture-required");
+        command_line->AppendSwitchWithValue("disable-features", "HardwareMediaKeyHandling,WebBluetooth");
 
         #ifndef _WIN32
         // Linux-specific: Critical for subprocess stability
@@ -642,7 +643,7 @@ void CEFBackend::onLoadEnd() {
         // Detect page reload (happens when cookies are accepted)
         if (page_loaded_.load()) {
             page_reloaded_ = true;
-            Logger::info(">>> PAGE RELOADED detected - will resync audio/video");
+            Logger::info("Page reloaded detected - will resync audio/video");
         }
 
         page_loaded_ = true;
@@ -659,9 +660,9 @@ void CEFBackend::onLoadEnd() {
                         for (const char* const* script_ptr = all_cef_scripts; *script_ptr != nullptr; ++script_ptr) {
                             frame->ExecuteJavaScript(*script_ptr, frame->GetURL(), 0);
                         }
-                        Logger::info(">>> JAVASCRIPT INJECTED: All CEF scripts from js-inject/ directory");
+                        Logger::info("JavaScript injected: All CEF scripts from js-inject/ directory");
                     } else {
-                        Logger::info(">>> JAVASCRIPT INJECTION DISABLED (--no-js flag)");
+                        Logger::info("JavaScript injection disabled (--no-js flag)");
                     }
                 }
             }

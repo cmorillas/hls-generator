@@ -7,8 +7,8 @@
 struct HLSConfig {
     std::string inputFile;
     std::string outputDir;
-    int segmentDuration = 2;  // Reduced from 3s to 2s for lower latency
-    int playlistSize = 3;     // Reduced from 5 to 3 for faster startup
+    int segmentDuration = 2;  // 2s segments - good balance of latency and efficiency
+    int playlistSize = 3;     // Small live window (3 segments = ~6s buffer)
 };
 
 struct VideoConfig {
@@ -16,7 +16,8 @@ struct VideoConfig {
     int height = 720;
     int fps = 30;
     int bitrate = 2500000;
-    int gop_size = 60;  // 30 fps × 2s = 60 frames (one IDR per segment)
+    int gop_size = 15;  // 15 frames = 0.5s keyframe interval for FAST segment generation
+                        // This ensures the first HLS segment appears within 0.5 seconds
 };
 
 struct AudioConfig {

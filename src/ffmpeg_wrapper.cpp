@@ -14,9 +14,12 @@ extern "C" {
 #include <libavutil/opt.h>
 }
 
+#include <fstream>
+#include <vector>
+#include <cstdlib>
+
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <fstream>
 
 #ifdef PLATFORM_WINDOWS
 #include <direct.h>
@@ -341,16 +344,47 @@ bool FFmpegWrapper::setupOutput() {
         }
     }
 
-    ffmpegCtx_->av_opt_set(outputFormatCtx_->priv_data, "hls_time", std::to_string(config_.hls.segmentDuration).c_str(), 0);
+    // Configure segment duration for HLS output
+    ffmpegCtx_->av_opt_set(outputFormatCtx_->priv_data, "hls_time", "0.5", 0);
 
     std::string segmentPattern = config_.hls.outputDir + "/part" + std::to_string(reload_count_) + "_segment%03d.ts";
     ffmpegCtx_->av_opt_set(outputFormatCtx_->priv_data, "hls_segment_filename", segmentPattern.c_str(), 0);
 
+    // Start HLS segment numbering from 000
+    ffmpegCtx_->av_opt_set(outputFormatCtx_->priv_data, "start_number", "0", 0);
+
     if (streamInput_->isLiveStream()) {
         ffmpegCtx_->av_opt_set(outputFormatCtx_->priv_data, "hls_playlist_type", "event", 0);
         ffmpegCtx_->av_opt_set(outputFormatCtx_->priv_data, "hls_list_size", std::to_string(config_.hls.playlistSize).c_str(), 0);
-        ffmpegCtx_->av_opt_set(outputFormatCtx_->priv_data, "hls_flags", "append_list+delete_segments+independent_segments", 0);
-        Logger::info("Configured for live streaming (event type, " + std::to_string(config_.hls.playlistSize) + " segments x " + std::to_string(config_.hls.segmentDuration) + "s, auto-cleanup)");
+        const std::string baseFlags = "append_list+delete_segments+independent_segments";
+        if (ffmpegCtx_->av_opt_set(outputFormatCtx_->priv_data, "hls_flags", baseFlags.c_str(), 0) < 0) {
+            Logger::error("Failed to set HLS flags: " + baseFlags);
+            return false;
+        }
+
+        int ffmpegMajor = 0;
+        if (ffmpegCtx_->av_version_info) {
+            const char* ver = ffmpegCtx_->av_version_info();
+            if (ver) {
+                ffmpegMajor = std::atoi(ver);
+            }
+        }
+
+        if (ffmpegMajor >= 7) {
+            const std::string rapidFlags = baseFlags + "+rapid_chunking";
+            if (ffmpegCtx_->av_opt_set(outputFormatCtx_->priv_data, "hls_flags", rapidFlags.c_str(), 0) == 0) {
+                Logger::info("Configured for live streaming (event type, " + std::to_string(config_.hls.playlistSize) +
+                             " segments x " + std::to_string(config_.hls.segmentDuration) + "s, rapid chunking, auto-cleanup)");
+            } else {
+                Logger::warn("rapid_chunking flag not supported by this FFmpeg build, continuing without it");
+                ffmpegCtx_->av_opt_set(outputFormatCtx_->priv_data, "hls_flags", baseFlags.c_str(), 0);
+                Logger::info("Configured for live streaming (event type, " + std::to_string(config_.hls.playlistSize) +
+                             " segments x " + std::to_string(config_.hls.segmentDuration) + "s, auto-cleanup)");
+            }
+        } else {
+            Logger::info("Configured for live streaming (event type, " + std::to_string(config_.hls.playlistSize) +
+                         " segments x " + std::to_string(config_.hls.segmentDuration) + "s, auto-cleanup)");
+        }
     } else {
         ffmpegCtx_->av_opt_set(outputFormatCtx_->priv_data, "hls_list_size", "0", 0);
         ffmpegCtx_->av_opt_set(outputFormatCtx_->priv_data, "hls_playlist_type", "vod", 0);
@@ -374,27 +408,27 @@ bool FFmpegWrapper::setupOutput() {
 }
 
 bool FFmpegWrapper::resetOutput() {
-    Logger::info(">>> RESETTING OUTPUT: Closing and recreating HLS muxer");
+    Logger::info("Resetting output: Closing and recreating HLS muxer");
 
     if (outputFormatCtx_) {
         if (outputFormatCtx_->pb && !(outputFormatCtx_->oformat->flags & AVFMT_NOFILE)) {
             ffmpegCtx_->avio_closep(&outputFormatCtx_->pb);
-            Logger::info(">>> Closed output file");
+            Logger::info("Closed output file");
         }
         outputFormatCtx_.reset();
-        Logger::info(">>> Freed output format context");
+        Logger::info("Freed output format context");
     }
 
     reload_count_++;
-    Logger::info(">>> Starting Part " + std::to_string(reload_count_));
+    Logger::info("Starting Part " + std::to_string(reload_count_));
 
     // Reset video pipeline (SwsContext, encoder, decoder)
     videoPipeline_->reset();
-    Logger::info(">>> Reset video pipeline");
+    Logger::info("Reset video pipeline");
 
     // Reset audio pipeline (SwrContext and PTS tracker)
     audioPipeline_->reset();
-    Logger::info(">>> Reset audio pipeline");
+    Logger::info("Reset audio pipeline");
 
     outputVideoStreamIndex_ = -1;
     outputAudioStreamIndex_ = -1;
@@ -404,7 +438,7 @@ bool FFmpegWrapper::resetOutput() {
         return false;
     }
 
-    Logger::info(">>> OUTPUT MUXER RESET COMPLETE");
+    Logger::info("Output muxer reset complete");
     return true;
 }
 

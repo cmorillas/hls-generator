@@ -11,6 +11,8 @@
 #include <atomic>
 #include <vector>
 #include <memory>
+#include <thread>
+#include <condition_variable>
 
 // Forward declarations
 class FFmpegContext;
@@ -60,6 +62,7 @@ private:
     std::vector<uint8_t> current_frame_;
     bool frame_ready_;
     std::atomic<bool> resetting_encoders_;
+    std::atomic<bool> received_real_frame_{false};
     int64_t frame_count_;
     int64_t start_time_ms_;
     int snapshot_width_;
@@ -71,17 +74,16 @@ private:
     int64_t audio_samples_written_;
     int64_t audio_start_pts_;
     bool audio_stream_started_;
-    int64_t last_audio_packet_count_;
 
     bool initialized_;
     std::atomic<bool> running_;
 
     std::function<bool()> pageReloadCallback_;
 
-    // SMPTE test bars placeholder
-    std::unique_ptr<AVFrame, AVFrameDeleter> smpte_frame_;
-    bool createSMPTEFrame();
-    void fillSMPTEBars(AVFrame* frame);
+    // CEF initialization
+    std::atomic<bool> cef_initialized_{false};
+    std::string pending_uri_;
+    void tryInitializeCEF();
 
     bool setupEncoder(bool is_reset = false);
     bool setupAudioEncoder(int sample_rate, int channels, bool is_reset = false);

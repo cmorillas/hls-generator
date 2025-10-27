@@ -1,8 +1,6 @@
 #include "hls_generator.h"
 #include "ffmpeg_wrapper.h"
 #include "logger.h"
-#include <thread>
-#include <atomic>
 
 HLSGenerator::HLSGenerator(const AppConfig& config)
     : config_(config), ffmpegWrapper_(std::make_unique<FFmpegWrapper>(config)) {
@@ -22,51 +20,17 @@ bool HLSGenerator::initialize(const std::string& ffmpegLibPath) {
         return false;
     }
 
-    // STEP 2: Parallelize setupOutput() in background thread
-    // NOTE: openInput() with CEF MUST stay on main thread (CEF requires UI thread)
-    std::atomic<bool> outputSetupSuccess(false);
-    std::atomic<bool> outputThreadException(false);
-
-    // Background thread: Setup output (fast, ~100ms)
-    std::thread outputThread([&]() {
-        try {
-            Logger::info(">>> Setting up HLS output in background...");
-            outputSetupSuccess = ffmpegWrapper_->setupOutput();
-            Logger::info(">>> HLS output setup completed");
-        } catch (const std::exception& e) {
-            Logger::error("Exception in setupOutput thread: " + std::string(e.what()));
-            outputThreadException = true;
-        } catch (...) {
-            Logger::error("Unknown exception in setupOutput thread");
-            outputThreadException = true;
-        }
-    });
-
-    // STEP 3: Open input on MAIN thread (CEF requires this)
-    Logger::info(">>> Opening input on main thread (CEF requirement)...");
-    bool inputOpenSuccess = ffmpegWrapper_->openInput(config_.hls.inputFile);
-    Logger::info(">>> Input open completed");
-
-    // STEP 4: Wait for background thread to finish
-    outputThread.join();
-
-    // STEP 5: Check results
-    if (outputThreadException) {
-        Logger::error("Exception occurred in setupOutput thread");
-        return false;
-    }
-
-    if (!outputSetupSuccess) {
-        Logger::error("Failed to setup HLS output");
-        return false;
-    }
-
-    if (!inputOpenSuccess) {
+    // STEP 2: Open input on main thread (CEF requires main thread)
+    if (!ffmpegWrapper_->openInput(config_.hls.inputFile)) {
         Logger::error("Failed to open input file");
         return false;
     }
 
-    Logger::info(">>> Initialization successful (setupOutput parallelized)");
+    // STEP 3: Setup HLS output (must be after openInput)
+    if (!ffmpegWrapper_->setupOutput()) {
+        Logger::error("Failed to setup HLS output");
+        return false;
+    }
     initialized_ = true;
     return true;
 }
