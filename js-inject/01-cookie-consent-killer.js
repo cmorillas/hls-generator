@@ -26,45 +26,35 @@
         return document.body; // Fallback to full document
     }
 
+    // --- Constantes Globales (movidas al scope principal para ser accesibles por todas las funciones) ---
+    const acceptKeywords = [
+        // Spanish
+        'aceptar todo', 'aceptar', 'acepto', 'consentir', 'de acuerdo', 'continuar',
+        // English
+        'accept all', 'accept', 'i agree', 'agree', 'consent', 'got it', 'ok', 'allow all', 'continue', 'allow',
+        // German
+        'akzeptieren', 'zustimmen', 'einverstanden', 'alle akzeptieren',
+        // French
+        'accepter', 'tout accepter', "j'accepte", "d'accord",
+        // Italian
+        'accetto', 'accetta tutto', 'accettare', 'continua',
+        // Portuguese
+        'aceitar', 'aceitar tudo', 'concordo'
+    ];
+
+    const rejectKeywords = [
+        'reject', 'decline', 'deny', 'refuse', 'customize', 'settings',
+        'manage', 'preferences', 'only necessary', 'only essential',
+        'rechazar', 'denegar', 'personalizar', 'configurar',
+        'ablehnen', 'anpassen', 'rifiuta', 'recusar'
+    ];
+
+    const selectorPatterns = ['button', 'a', '[role="button"]', 'div[onclick]'];
+    // --- Fin de Constantes Globales ---
+
     function findAndClickCookieConsent() {
-        // Multi-language keywords for cookie acceptance
-        const acceptKeywords = [
-            // Spanish
-            'aceptar todo', 'aceptar', 'acepto', 'consentir', 'de acuerdo', 'continuar',
-            // English
-            'accept all', 'accept', 'i agree', 'agree', 'consent', 'got it', 'ok', 'allow all', 'continue', 'allow',
-            // German
-            'akzeptieren', 'zustimmen', 'einverstanden', 'alle akzeptieren',
-            // French
-            'accepter', 'tout accepter', "j'accepte", "d'accord",
-            // Italian
-            'accetto', 'accetta tutto', 'accettare', 'continua',
-            // Portuguese
-            'aceitar', 'aceitar tudo', 'concordo'
-        ];
-
-        // IMPROVEMENT 2: Negative keywords to avoid clicking wrong buttons
-        const rejectKeywords = [
-            'reject', 'decline', 'deny', 'refuse', 'customize', 'settings',
-            'manage', 'preferences', 'only necessary', 'only essential',
-            'rechazar', 'denegar', 'personalizar', 'configurar',
-            'ablehnen', 'anpassen', 'rifiuta', 'recusar'
-        ];
-
-        const selectorPatterns = ['button', 'a', '[role="button"]', 'div[onclick]'];
-
-        const tryClick = (element, reason) => {
-            if (element && typeof element.click === 'function') {
-                // Check if element is visible
-                if (element.offsetParent !== null || element.checkVisibility?.() !== false) {
-                    const text = element.innerText?.trim() || element.getAttribute('aria-label') || '';
-                    console.log('[hls-generator] ✓ Clicking consent button:', text, '(Reason:', reason, ')');
-                    element.click();
-                    return true;
-                }
-            }
-            return false;
-        };
+        // BUG FIX: La función tryClick estaba duplicada. Se ha eliminado esta versión
+        // y se utiliza la que está en el scope principal.
 
         // Find the modal container first (high z-index)
         const modalContainer = findModalContainer();
@@ -138,6 +128,44 @@
     let pollingInterval = null;
     let observer = null;
 
+    // --- Estrategia Específica para YouTube (más rápida y directa) ---
+    function findAndClickYouTubeConsent() {
+        const youtubeSpecificSelectors = [
+            'button.ytp-consent-button-modern', // Consentimiento en el reproductor
+            'ytd-consent-bump-v2-lightbox tp-yt-paper-button', // Diálogo principal
+            'tp-yt-paper-button[aria-label*="Accept"]',
+            'tp-yt-paper-button[aria-label*="Aceptar"]',
+            'tp-yt-paper-button[aria-label*="Akzeptieren"]',
+        ];
+
+        // BUG FIX: rejectKeywords ahora es accesible desde este scope.
+        for (const selector of youtubeSpecificSelectors) {
+            const buttons = document.querySelectorAll(selector);
+            for (const el of buttons) {
+                const elementText = (el.innerText?.toLowerCase().trim() || '') + ' ' +
+                                    (el.getAttribute('aria-label')?.toLowerCase() || '');
+                if (!rejectKeywords.some(keyword => elementText.includes(keyword))) {
+                    if (tryClick(el, 'YouTube-specific selector: ' + selector)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    const tryClick = (element, reason) => {
+        if (element && typeof element.click === 'function') {
+            if (element.offsetParent !== null || element.checkVisibility?.() !== false) {
+                const text = element.innerText?.trim() || element.getAttribute('aria-label') || '';
+                console.log('[hls-generator] ✓ Clicking consent button:', text, '(Reason:', reason, ')');
+                element.click();
+                return true;
+            }
+        }
+        return false;
+    };
+
     // IMPROVEMENT 3: Active polling for first 10 seconds (handles slow-loading modals like OneTrust)
     function startActivePolling() {
         console.log('[hls-generator] Starting active polling (500ms intervals for 10 seconds)...');
@@ -145,7 +173,12 @@
         pollingInterval = setInterval(() => {
             attempts++;
 
-            if (findAndClickCookieConsent()) {
+            // En YouTube, solo usamos la función específica y rápida.
+            const clicked = window.location.hostname.includes('youtube.com')
+                ? findAndClickYouTubeConsent()
+                : findAndClickCookieConsent();
+
+            if (clicked) {
                 console.log('[hls-generator] Cookie consent handled via polling (attempt ' + attempts + ')');
                 clearInterval(pollingInterval);
                 if (observer) observer.disconnect();
@@ -153,7 +186,11 @@
             }
 
             // After 20 attempts (10 seconds), switch to passive observer
-            if (attempts >= 20) {
+            // O si es YouTube y falla, pasamos directamente al observador genérico como fallback.
+            if (attempts >= 20 || (window.location.hostname.includes('youtube.com') && attempts >= 10)) {
+                if (window.location.hostname.includes('youtube.com')) {
+                    console.log('[hls-generator] YouTube-specific polling failed. Switching to generic observer as fallback.');
+                }
                 console.log('[hls-generator] Polling complete. Switching to passive MutationObserver...');
                 clearInterval(pollingInterval);
                 startPassiveObserver();
@@ -163,11 +200,19 @@
 
     // Passive MutationObserver for remaining time
     function startPassiveObserver() {
+        // BUG FIX: El observer ahora es consciente del contexto (YouTube vs Genérico)
+        // para no usar la búsqueda lenta en YouTube.
         observer = new MutationObserver((mutations, obs) => {
-            if (findAndClickCookieConsent()) {
+            const clicked = window.location.hostname.includes('youtube.com')
+                ? findAndClickYouTubeConsent()
+                : findAndClickCookieConsent();
+
+            if (clicked) {
                 console.log('[hls-generator] Cookie consent handled via MutationObserver');
                 obs.disconnect();
-                if (pollingInterval) clearInterval(pollingInterval);
+                if (pollingInterval) {
+                    clearInterval(pollingInterval);
+                }
             }
         });
 
@@ -186,10 +231,19 @@
     }
 
     // Try immediately on script load
-    if (findAndClickCookieConsent()) {
-        console.log('[hls-generator] Cookie consent handled immediately');
+    if (window.location.hostname.includes('youtube.com')) {
+        console.log('[hls-generator] YouTube detected. Using fast-path polling.');
+        if (findAndClickYouTubeConsent()) {
+            console.log('[hls-generator] Cookie consent handled immediately on YouTube');
+        } else {
+            startActivePolling();
+        }
     } else {
-        // Start active polling
-        startActivePolling();
+        console.log('[hls-generator] Generic site detected. Using standard polling.');
+        if (findAndClickCookieConsent()) {
+            console.log('[hls-generator] Cookie consent handled immediately');
+        } else {
+            startActivePolling();
+        }
     }
 })();
